@@ -1,7 +1,8 @@
 import streamlit as st
 from openai import OpenAI
-import os, json, sqlite3, uuid, hashlib
+import os, json, sqlite3, uuid, hashlib, html
 from datetime import datetime
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Interview Coach Pro", page_icon="🎓", layout="wide")
 DB="interview_coach.db"
@@ -9,7 +10,6 @@ DB="interview_coach.db"
 def conn():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
     c.execute("""CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY,pin TEXT,student TEXT,role TEXT,band TEXT,vacancy TEXT,question TEXT,answer TEXT,result TEXT,shared INTEGER DEFAULT 0,status TEXT,updated TEXT)""")
-    
     for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT"]:
         try: c.execute(f"ALTER TABLE rooms ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
@@ -26,10 +26,170 @@ def update(code,**kw):
     c.execute("UPDATE rooms SET updated=? WHERE code=?",(datetime.now().isoformat(timespec="seconds"),code.upper()))
     c.commit(); c.close()
 
+def secret(name):
+    try:
+        return st.secrets[name]
+    except Exception:
+        return os.getenv(name)
+
 def client():
-    if not os.getenv("OPENAI_API_KEY"):
+    key=secret("OPENAI_API_KEY")
+    if not key:
         st.error("OPENAI_API_KEY is not available on this computer/server."); st.stop()
-    return OpenAI()
+    return OpenAI(api_key=key)
+
+def livekit_credentials_ok():
+    return all(secret(x) for x in ["LIVEKIT_URL","LIVEKIT_API_KEY","LIVEKIT_API_SECRET"])
+
+def livekit_token(room_code, identity, can_publish=True, can_subscribe=True):
+    from livekit import api
+    url=secret("LIVEKIT_URL")
+    key=secret("LIVEKIT_API_KEY")
+    sec=secret("LIVEKIT_API_SECRET")
+    if not all([url,key,sec]):
+        raise RuntimeError("LiveKit secrets are missing.")
+    grant=api.VideoGrants(
+        room_join=True,
+        room=f"interview-{room_code.upper()}",
+        can_publish=can_publish,
+        can_subscribe=can_subscribe,
+    )
+    token=(api.AccessToken(key,sec)
+           .with_identity(identity)
+           .with_grants(grant)
+           .to_jwt())
+    return url,token
+
+def live_audio_panel(room_code, role):
+    """
+    LiveKit handles immediate two-way audio.
+    Student can publish microphone audio; Teacher can subscribe and may also publish.
+    Existing st.audio_input remains the saved answer used for transcription/assessment.
+    """
+    if not livekit_credentials_ok():
+        st.warning("Live audio is not configured. Check LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET in Streamlit Secrets.")
+        return
+
+    # Opaque identity: do not put student names/PII into LiveKit identity.
+    identity=f"{role.lower()}-{uuid.uuid4().hex[:12]}"
+    try:
+        url,token=livekit_token(room_code,identity,can_publish=True,can_subscribe=True)
+    except Exception as e:
+        st.error(f"Live audio setup error: {e}")
+        return
+
+    safe_url=html.escape(str(url),quote=True)
+    safe_token=html.escape(str(token),quote=True)
+    role_label="Teacher" if role=="Teacher" else "Student"
+
+    live_html=f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+      <style>
+        body {{ font-family: Arial, sans-serif; margin: 0; }}
+        .box {{ border:1px solid #d9d9d9; border-radius:12px; padding:14px; }}
+        button {{ padding:10px 14px; margin:4px; border:0; border-radius:8px; cursor:pointer; font-weight:600; }}
+        #join {{ background:#16a34a; color:white; }}
+        #mute {{ background:#e5e7eb; }}
+        #leave {{ background:#dc2626; color:white; }}
+        #status {{ margin-top:8px; font-size:14px; }}
+        #remoteAudio audio {{ width:100%; margin-top:8px; }}
+      </style>
+    </head>
+    <body>
+      <div class="box">
+        <b>🎧 Live Interview Audio — {role_label}</b><br>
+        <button id="join">Join Live Audio</button>
+        <button id="mute" disabled>Mute</button>
+        <button id="leave" disabled>Leave</button>
+        <div id="status">Not connected</div>
+        <div id="remoteAudio"></div>
+      </div>
+      <script>
+        const LK = LivekitClient;
+        let room = null;
+        let micEnabled = true;
+
+        function status(msg) {{
+          document.getElementById('status').textContent = msg;
+        }}
+
+        function attachTrack(track) {{
+          if (track.kind === LK.Track.Kind.Audio) {{
+            const el = track.attach();
+            el.autoplay = true;
+            document.getElementById('remoteAudio').appendChild(el);
+            el.play().catch(() => {{}});
+          }}
+        }}
+
+        document.getElementById('join').onclick = async () => {{
+          try {{
+            status('Connecting…');
+            room = new LK.Room({{ adaptiveStream:true, dynacast:true }});
+
+            room.on(LK.RoomEvent.TrackSubscribed, (track) => {{
+              attachTrack(track);
+              status('Connected — live audio active');
+            }});
+
+            room.on(LK.RoomEvent.TrackUnsubscribed, (track) => {{
+              track.detach().forEach(el => el.remove());
+            }});
+
+            room.on(LK.RoomEvent.ParticipantConnected, () => {{
+              status('Connected — other participant joined');
+            }});
+
+            room.on(LK.RoomEvent.ParticipantDisconnected, () => {{
+              status('Connected — waiting for other participant');
+            }});
+
+            await room.connect("{safe_url}", "{safe_token}");
+
+            // Attach already-subscribed remote audio, if any.
+            room.remoteParticipants.forEach((participant) => {{
+              participant.trackPublications.forEach((publication) => {{
+                if (publication.track) attachTrack(publication.track);
+              }});
+            }});
+
+            await room.localParticipant.setMicrophoneEnabled(true);
+
+            document.getElementById('join').disabled = true;
+            document.getElementById('mute').disabled = false;
+            document.getElementById('leave').disabled = false;
+            status('Connected — microphone live');
+          }} catch (e) {{
+            status('Live audio error: ' + (e.message || e));
+          }}
+        }};
+
+        document.getElementById('mute').onclick = async () => {{
+          if (!room) return;
+          micEnabled = !micEnabled;
+          await room.localParticipant.setMicrophoneEnabled(micEnabled);
+          document.getElementById('mute').textContent = micEnabled ? 'Mute' : 'Unmute';
+          status(micEnabled ? 'Connected — microphone live' : 'Connected — microphone muted');
+        }};
+
+        document.getElementById('leave').onclick = async () => {{
+          if (!room) return;
+          await room.disconnect();
+          room = null;
+          document.getElementById('join').disabled = false;
+          document.getElementById('mute').disabled = true;
+          document.getElementById('leave').disabled = true;
+          status('Disconnected');
+        }};
+      </script>
+    </body>
+    </html>
+    """
+    components.html(live_html,height=170,scrolling=False)
 
 def transcribe(audio):
     data=audio.getvalue()
@@ -110,7 +270,7 @@ def show(r):
     for x in r.get("follow_up_questions",[]): st.write("•",x)
 
 st.title("🎓 Interview Coach Pro")
-st.caption("Teacher-controlled interview room • Student voice answers • Vacancy-specific AI assessment")
+st.caption("Teacher-controlled interview room • Live two-way audio • Student voice capture • Vacancy-specific AI assessment")
 mode=st.sidebar.radio("Open as",["Teacher","Student","Student Practice","Mock Interview"])
 
 if mode=="Teacher":
@@ -147,6 +307,10 @@ if mode=="Teacher":
         if r and r["pin"]==hp(st.session_state.get("pin","")):
             st.divider(); st.subheader(f"Live Room: {code}")
             st.write(f"**Student:** {r['student'] or 'Not named'} | **Role:** {r['role']} | **{r['band']}**")
+            st.markdown("### 🎧 Live Interview Audio")
+            st.caption("Teacher and Student should each press Join Live Audio. Allow microphone access when the browser asks.")
+            live_audio_panel(code,"Teacher")
+
             st.markdown("### 🧠 Adaptive AI Question Bank")
             nq=st.slider("Number of questions to generate",5,20,10)
             if st.button("✨ Generate Questions from Advert + JD + PS + Application",type="primary"):
@@ -193,30 +357,36 @@ elif mode=="Student":
     if code:
         r=room(code)
         if not r: st.error("Room not found.")
-        elif not r["question"]:
-            st.info("Waiting for teacher to send a question.")
-            if st.button("Refresh"): st.rerun()
         else:
-            st.write(f"**Role:** {r['role']} | **{r['band']}**")
-            st.markdown("### Interview Question"); st.info(r["question"])
-            method=st.radio("Answer using",["🎙️ Microphone","⌨️ Type"],horizontal=True)
-            if method=="🎙️ Microphone":
-                audio=st.audio_input("Record your answer")
-                if audio:
-                    st.audio(audio)
-                    if st.button("Transcribe My Answer"):
-                        with st.spinner("Transcribing..."):
-                            try: st.session_state.transcript=transcribe(audio)
-                            except Exception as e: st.error(f"Transcription error: {e}")
-                ans=st.text_area("Review your transcript",value=st.session_state.get("transcript",""),height=220)
-            else: ans=st.text_area("Your answer",height=220)
-            if st.button("Submit Answer to Teacher",type="primary"):
-                if ans.strip(): update(code,answer=ans.strip(),result="",shared=0,status="answered"); st.success("Answer sent privately to teacher.")
-                else: st.warning("Record or type your answer first.")
-            if st.button("Refresh Feedback"): st.rerun()
-            r=room(code)
-            if r["result"] and r["shared"]: st.divider(); st.header("📋 Teacher-Shared Feedback"); show(json.loads(r["result"]))
-            elif r["result"]: st.info("Your answer has been assessed. The teacher has not shared the result yet.")
+            st.markdown("### 🎧 Live Interview Audio")
+            st.caption("Press Join Live Audio and allow microphone access. Your teacher can hear you while you speak.")
+            live_audio_panel(code,"Student")
+
+            if not r["question"]:
+                st.info("Waiting for teacher to send a question.")
+                if st.button("Refresh"): st.rerun()
+            else:
+                st.write(f"**Role:** {r['role']} | **{r['band']}**")
+                st.markdown("### Interview Question"); st.info(r["question"])
+                method=st.radio("Answer using",["🎙️ Microphone","⌨️ Type"],horizontal=True)
+                if method=="🎙️ Microphone":
+                    st.caption("Live Audio lets the teacher hear you immediately. Record below as well so the app can save/transcribe your answer for AI assessment.")
+                    audio=st.audio_input("Record answer for transcript and assessment")
+                    if audio:
+                        st.audio(audio)
+                        if st.button("Transcribe My Answer"):
+                            with st.spinner("Transcribing..."):
+                                try: st.session_state.transcript=transcribe(audio)
+                                except Exception as e: st.error(f"Transcription error: {e}")
+                    ans=st.text_area("Review your transcript",value=st.session_state.get("transcript",""),height=220)
+                else: ans=st.text_area("Your answer",height=220)
+                if st.button("Submit Answer to Teacher",type="primary"):
+                    if ans.strip(): update(code,answer=ans.strip(),result="",shared=0,status="answered"); st.success("Answer sent privately to teacher.")
+                    else: st.warning("Record or type your answer first.")
+                if st.button("Refresh Feedback"): st.rerun()
+                r=room(code)
+                if r["result"] and r["shared"]: st.divider(); st.header("📋 Teacher-Shared Feedback"); show(json.loads(r["result"]))
+                elif r["result"]: st.info("Your answer has been assessed. The teacher has not shared the result yet.")
 
 else:
     st.header("🧑‍🎓 "+mode)
