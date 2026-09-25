@@ -10,7 +10,7 @@ DB="interview_coach.db"
 def conn():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
     c.execute("""CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY,pin TEXT,student TEXT,role TEXT,band TEXT,vacancy TEXT,question TEXT,answer TEXT,result TEXT,shared INTEGER DEFAULT 0,status TEXT,updated TEXT)""")
-    for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT"]:
+    for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT", "audio_data BLOB", "audio_mime TEXT", "audio_name TEXT"]:
         try: c.execute(f"ALTER TABLE rooms ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     c.commit(); return c
@@ -118,6 +118,7 @@ STUDENT_AUDIO_HTML = """
   <button id="stop" disabled>Stop & Send Recording</button>
   <button id="leave" disabled>Leave</button>
   <div id="status">Not connected</div>
+  <div id="timer">⏱️ 00:00:00</div>
   <div id="remote"></div>
 </div>
 """
@@ -125,14 +126,31 @@ STUDENT_AUDIO_CSS = """
 .icp-box{border:1px solid #d9d9d9;border-radius:12px;padding:14px;font-family:Arial,sans-serif}
 button{padding:10px 14px;margin:4px;border:0;border-radius:8px;cursor:pointer;font-weight:600}
 #join{background:#16a34a;color:white} #start{background:#2563eb;color:white} #stop{background:#dc2626;color:white} #leave{background:#6b7280;color:white}
-#status{margin-top:8px;font-size:14px} #remote audio{width:100%;margin-top:8px}
+#status{margin-top:8px;font-size:14px} #timer{margin-top:8px;font-size:22px;font-weight:700} #remote audio{width:100%;margin-top:8px}
 """
 STUDENT_AUDIO_JS = r"""
 export default function(component) {
   const { data, parentElement, setStateValue } = component;
   const q = (s) => parentElement.querySelector(s);
-  const join=q('#join'), start=q('#start'), stop=q('#stop'), leave=q('#leave'), status=q('#status'), remote=q('#remote');
-  let room=null, localTrack=null, recorder=null, chunks=[];
+  const join=q('#join'), start=q('#start'), stop=q('#stop'), leave=q('#leave'), status=q('#status'), timer=q('#timer'), remote=q('#remote');
+  let room=null, localTrack=null, recorder=null, chunks=[], timerInterval=null, recordingStartedAt=null;
+  function formatElapsed(ms){
+    const total=Math.max(0,Math.floor(ms/1000));
+    const h=String(Math.floor(total/3600)).padStart(2,'0');
+    const m=String(Math.floor((total%3600)/60)).padStart(2,'0');
+    const sec=String(total%60).padStart(2,'0');
+    return `${h}:${m}:${sec}`;
+  }
+  function startTimer(){
+    recordingStartedAt=Date.now();
+    timer.textContent='🔴 Recording — 00:00:00';
+    if(timerInterval) clearInterval(timerInterval);
+    timerInterval=setInterval(()=>{ timer.textContent='🔴 Recording — '+formatElapsed(Date.now()-recordingStartedAt); },250);
+  }
+  function stopTimer(){
+    if(timerInterval){ clearInterval(timerInterval); timerInterval=null; }
+    if(recordingStartedAt) timer.textContent='⏹️ Recorded — '+formatElapsed(Date.now()-recordingStartedAt);
+  }
   const say=(m)=>{ status.textContent=m; };
 
   async function loadLK(){
@@ -172,6 +190,7 @@ export default function(component) {
       recorder=preferred ? new MediaRecorder(answerStream,{mimeType:preferred}) : new MediaRecorder(answerStream);
       recorder.ondataavailable=(e)=>{ if(e.data && e.data.size) chunks.push(e.data); };
       recorder.onstop=()=>{
+        stopTimer();
         const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'});
         const reader=new FileReader();
         reader.onloadend=()=>{
@@ -182,6 +201,7 @@ export default function(component) {
         recordingTrack.stop();
       };
       recorder.start(1000);
+      startTimer();
       start.disabled=true;
       stop.disabled=false;
       say('Recording answer — teacher can hear you live');
@@ -190,7 +210,7 @@ export default function(component) {
     }
   };
   stop.onclick=()=>{ if(recorder && recorder.state!=='inactive'){ recorder.stop(); stop.disabled=true; start.disabled=false; } };
-  leave.onclick=async()=>{ try{ if(recorder&&recorder.state!=='inactive')recorder.stop(); if(localTrack)localTrack.stop(); if(room)await room.disconnect(); }finally{ room=null;localTrack=null;join.disabled=false;start.disabled=true;stop.disabled=true;leave.disabled=true;say('Disconnected'); } };
+  leave.onclick=async()=>{ try{ if(recorder&&recorder.state!=='inactive')recorder.stop(); stopTimer(); if(localTrack)localTrack.stop(); if(room)await room.disconnect(); }finally{ room=null;localTrack=null;join.disabled=false;start.disabled=true;stop.disabled=true;leave.disabled=true;say('Disconnected'); } };
   return ()=>{ try{ if(localTrack)localTrack.stop(); if(room)room.disconnect(); }catch(e){} };
 }
 """
@@ -231,6 +251,14 @@ def transcribe(audio):
     data=audio.getvalue()
     out=client().audio.transcriptions.create(model="gpt-4o-mini-transcribe",file=(getattr(audio,"name","answer.wav"),data,getattr(audio,"type","audio/wav")))
     return out.text
+
+def recording_bytes(recording):
+    data_url=(recording or {}).get("data_url","")
+    if not data_url or "," not in data_url:
+        return b"", (recording or {}).get("mime","audio/webm")
+    header,payload=data_url.split(",",1)
+    mime=(recording or {}).get("mime") or (header.split(";")[0].replace("data:","") if header.startswith("data:") else "audio/webm")
+    return base64.b64decode(payload), mime
 
 def transcribe_data_url(recording):
     if not recording or not recording.get("data_url"):
@@ -274,23 +302,111 @@ def generate_questions(role,band,advert,jd,ps,application,n):
     return json.loads(text)["questions"]
 
 def assess(role,band,vacancy,question,answer):
-    instructions="""You are a rigorous healthcare interview assessor. Assess only against the actual question and supplied vacancy/JD/person specification. First classify the question. Do not force STAR onto motivation, knowledge or other unsuitable questions. Apply clinical safety, escalation and scope criteria only when relevant. Empty answers score 0; very short or vague answers score very low. Keyword stuffing without meaningful evidence must not score highly. Unsafe clinical answers must be flagged and overall score capped. Separate factual/clinical correctness from interview effectiveness. Never invent candidate experience. When a genuine example is absent, provide a framework/template, not a fabricated event. Return JSON only with keys: question_type, panel_is_testing, likely_keywords, vacancy_matches, overall_score, verdict, correctness, safety_status, score_breakdown, strengths, missing_points, improvements, framework, suggested_answer, follow_up_questions. overall_score is 0-100. verdict is one of Strong / Interview Ready; Good but Can Be Strengthened; Partially Correct; Significant Improvement Needed; Safety-Critical Concern."""
+    instructions="""You are a rigorous NHS interview assessor.
+
+PRIMARY RULE — TRUST-SPECIFIC SCORING:
+Every score must be based on the requirements supplied for THIS vacancy, not on a generic NHS marking sheet.
+
+First extract the vacancy-specific assessment criteria from the supplied material, including where present:
+- employing NHS Trust/Board and service/department
+- job description and duties
+- person specification essential criteria
+- person specification desirable criteria
+- qualifications/registration requirements
+- experience requirements
+- clinical/technical competencies
+- communication, teamwork, leadership and behavioural competencies
+- safeguarding, patient safety, scope of practice, escalation and governance requirements
+- Trust/Board values and behaviours
+- role-specific knowledge
+- Band/seniority expectations
+- candidate application claims that legitimately invite follow-up
+
+Then classify the interview question and select ONLY the vacancy criteria that are relevant to that particular question. Build the marking matrix BEFORE scoring the answer.
+
+SCORING:
+Use a standardised 0-5 display scale so the student can understand performance, but the CONTENT required to earn each mark must come from the specific Trust/Board vacancy requirements.
+
+0 = no relevant evidence, no answer, or fundamentally unsafe answer where safety is central.
+1 = very weak evidence against the relevant vacancy criteria; major essential points absent.
+2 = limited evidence; some relevant points but important vacancy-specific indicators are missing.
+3 = satisfactory evidence meeting the main relevant vacancy requirements for this question.
+4 = strong, specific evidence meeting nearly all relevant vacancy indicators at the expected role/Band level.
+5 = excellent, comprehensive and specific evidence meeting all or almost all relevant vacancy indicators at the expected role/Band level.
+
+If the supplied Trust/Board documents explicitly state their own interview scoring scale, weighting, values framework, competency framework, pass rule, or question-specific scoring instructions, FOLLOW THAT documented method instead of assuming a generic NHS method. Explain the applicable scale in scoring_note.
+
+RULES:
+- Award marks only for evidence actually present in the candidate's answer.
+- Do not award marks merely because a keyword appears.
+- Essential person-specification requirements relevant to the question carry greater significance than desirable criteria.
+- Do not invent Trust values, requirements, thresholds or candidate experience.
+- Do not assume all NHS organisations use the same interview scoring system.
+- STAR is useful for behavioural/competency/experience questions but must not be forced onto motivation, knowledge or other unsuitable question types.
+- For clinical/scenario/safeguarding questions, assess factual/clinical correctness, safety, scope, prioritisation, escalation and communication only when relevant to the question and vacancy.
+- Empty answer = 0. Very short/vague answers should score very low.
+- Materially unsafe content must be flagged and may cap the score.
+- Separate factual/clinical correctness from interview effectiveness.
+- Suggested answers must remain consistent with the candidate's supplied application evidence. Never fabricate personal experience.
+- If no genuine personal example is available, give a framework/template the candidate can complete truthfully.
+- Do not declare a candidate universally NHS 'appointable' or 'not appointable' unless the supplied employer documents explicitly define such a threshold and the available evidence permits that conclusion.
+
+Return JSON only with keys:
+trust_or_board, question_type, panel_is_testing, trust_requirements_used, marking_matrix, essential_criteria_relevant, desirable_criteria_relevant, values_relevant, likely_keywords, vacancy_matches, nhs_score, max_score, overall_score, verdict, correctness, safety_status, score_breakdown, criteria_met, criteria_not_met, strengths, missing_points, improvements, framework, suggested_answer, follow_up_questions, scoring_note.
+
+marking_matrix must identify each relevant vacancy-specific criterion and what evidence in this answer would demonstrate it.
+trust_requirements_used must identify which supplied Trust/Board requirements were actually used to score this question.
+If no Trust/Board-specific criterion relevant to a category is supplied, say "Not specified in supplied vacancy material" rather than inventing one.
+
+Unless an explicit employer scoring scale supplied in the vacancy materials requires otherwise:
+nhs_score must be an integer 0-5.
+max_score must be 5.
+overall_score must equal nhs_score * 20.
+
+verdict must be one of:
+Strong / Interview Ready
+Good but Can Be Strengthened
+Partially Correct
+Significant Improvement Needed
+Safety-Critical Concern
+"""
     prompt=f"""ROLE: {role}
 BAND: {band}
-VACANCY/JD/PERSON SPECIFICATION:
-{vacancy or "Not supplied"}
-QUESTION:
+
+SUPPLIED TRUST/BOARD VACANCY MATERIALS:
+{vacancy or "No vacancy material supplied"}
+
+INTERVIEW QUESTION:
 {question}
+
 CANDIDATE ANSWER:
 {answer}
-Assess fairly, specifically and evidence-first."""
+
+Score this answer specifically against the requirements of the supplied Trust/Board vacancy. Do not substitute generic NHS criteria for vacancy-specific criteria."""
     res=client().responses.create(model="gpt-5.6",instructions=instructions,input=prompt)
-    text=res.output_text.strip()
-    if text.startswith("```"): text=text.split("\n",1)[1].rsplit("```",1)[0].strip()
-    return json.loads(text)
+    raw=res.output_text.strip()
+    if raw.startswith("```"): raw=raw.split("\n",1)[1].rsplit("```",1)[0].strip()
+    result=json.loads(raw)
+
+    # Keep the app's comparable 0-5 display unless the returned result clearly
+    # provides another employer-specific max score.
+    try:
+        max_score=int(result.get("max_score",5))
+        score=int(result.get("nhs_score",0))
+        if max_score <= 0: max_score=5
+        score=max(0,min(max_score,score))
+    except Exception:
+        max_score,score=5,0
+
+    result["nhs_score"]=score
+    result["max_score"]=max_score
+    result["overall_score"]=round((score/max_score)*100) if max_score else 0
+    return result
 
 def show(r):
-    st.metric("Overall score",f"{int(r.get('overall_score',0))}/100")
+    cscore,cpercent=st.columns(2)
+    cscore.metric("NHS-style question score",f"{int(r.get('nhs_score',0))}/{int(r.get('max_score',5))}")
+    cpercent.metric("Equivalent percentage",f"{int(r.get('overall_score',0))}/100")
     st.subheader(r.get("verdict","Assessment"))
     a,b=st.columns(2)
     with a:
@@ -303,12 +419,21 @@ def show(r):
         for x in r.get("missing_points",[]): st.write("•",x)
         st.markdown("### How to improve")
         for x in r.get("improvements",[]): st.write("•",x)
+    st.markdown("### Trust/Board requirements used for this score")
+    trust_name=r.get("trust_or_board","Not identified from supplied vacancy material")
+    st.write("**Employer:**",trust_name)
+    for x in r.get("trust_requirements_used",[]): st.write("•",x)
+    st.markdown("### Question-specific marking matrix")
+    for x in r.get("marking_matrix",[]): st.write("•",x)
     st.markdown("### Detailed assessment")
     st.write("**Question type:**",r.get("question_type",""))
     st.write("**Panel is testing:**",r.get("panel_is_testing",""))
     st.write("**Correctness:**",r.get("correctness",""))
     st.write("**Safety:**",r.get("safety_status",""))
     st.write("**Score breakdown:**",r.get("score_breakdown",{}))
+    st.write("**Criteria met:**",r.get("criteria_met",[]))
+    st.write("**Criteria not met:**",r.get("criteria_not_met",[]))
+    st.caption(r.get("scoring_note",""))
     st.write("**Expected concepts/keywords:**",", ".join(r.get("likely_keywords",[])))
     st.markdown("### Recommended framework"); st.write(r.get("framework",""))
     st.markdown("### Stronger answer"); st.write(r.get("suggested_answer",""))
@@ -316,7 +441,7 @@ def show(r):
     for x in r.get("follow_up_questions",[]): st.write("•",x)
 
 st.title("🎓 Interview Coach Pro")
-st.caption("Teacher-controlled interview room • Live two-way audio • Student voice capture • Vacancy-specific AI assessment")
+st.caption("Teacher-controlled interview room • Live two-way audio • Timed voice capture • NHS-style evidence scoring • Vacancy-specific AI assessment")
 mode=st.sidebar.radio("Open as",["Teacher","Student","Student Practice","Mock Interview"])
 
 if mode=="Teacher":
@@ -378,9 +503,12 @@ if mode=="Teacher":
                 q=st.text_area("Manual question (or generate the adaptive question bank above)",value=r["question"] or "")
             c1,c2=st.columns(2)
             if c1.button("📨 Send Selected Question"):
-                if q.strip(): update(code,question=q.strip(),answer="",result="",shared=0,status="question_sent"); st.success("Only this question was sent to the student."); st.rerun()
+                if q.strip(): update(code,question=q.strip(),answer="",audio_data=None,audio_mime=None,audio_name=None,result="",shared=0,status="question_sent"); st.success("Only this question was sent to the student."); st.rerun()
             if c2.button("🔄 Refresh"): st.rerun()
             r=room(code); st.markdown("### Student answer")
+            if r["audio_data"]:
+                st.markdown("#### 🔊 Student voice recording")
+                st.audio(bytes(r["audio_data"]), format=r["audio_mime"] or "audio/webm")
             if r["answer"]:
                 st.write(r["answer"])
                 if st.button("🧠 Analyse Answer",type="primary"):
@@ -412,11 +540,12 @@ elif mode=="Student":
                 if st.session_state.get(f"processed_recording_{code}") != rec_id:
                     with st.spinner("Transcribing your answer..."):
                         try:
+                            audio_bytes,audio_mime=recording_bytes(recording)
                             transcript=transcribe_data_url(recording)
                             st.session_state[f"captured_transcript_{code}"]=transcript
                             st.session_state[f"processed_recording_{code}"]=rec_id
                             if transcript.strip():
-                                update(code,answer=transcript.strip(),result="",shared=0,status="answered")
+                                update(code,answer=transcript.strip(),audio_data=audio_bytes,audio_mime=audio_mime,audio_name="live-answer",result="",shared=0,status="answered")
                                 st.success("Your recorded answer was transcribed and sent privately to the teacher.")
                         except Exception as e:
                             st.error(f"Transcription error: {e}")
@@ -427,16 +556,34 @@ elif mode=="Student":
             else:
                 st.write(f"**Role:** {r['role']} | **{r['band']}**")
                 st.markdown("### Interview Question"); st.info(r["question"])
-                method=st.radio("Answer using",["🎙️ Live microphone","⌨️ Type"],horizontal=True)
-                if method=="🎙️ Live microphone":
+                method=st.radio("Answer using",["🎙️ Live microphone + recording","🎤 Backup voice recorder","⌨️ Type"],horizontal=True)
+                if method=="🎙️ Live microphone + recording":
+                    st.caption("The recording timer continues until you press Stop & Send Recording. The app does not impose a fixed answer-time cutoff; normal browser/server limits can still apply.")
                     ans=st.text_area("Captured transcript",value=st.session_state.get(f"captured_transcript_{code}",r["answer"] or ""),height=220,help="The transcript appears here after Stop & Send Recording.")
                     if ans.strip() and ans.strip() != (r["answer"] or "").strip():
                         if st.button("Send Edited Transcript to Teacher",type="primary"):
                             update(code,answer=ans.strip(),result="",shared=0,status="answered"); st.success("Edited transcript sent privately to teacher.")
+                elif method=="🎤 Backup voice recorder":
+                    st.caption("Second voice option: record here. Both the recording and transcript are sent privately to the teacher.")
+                    backup_audio=st.audio_input("Record your answer for the teacher",key=f"backup_audio_{code}")
+                    if backup_audio and st.button("Send Voice Recording to Teacher",type="primary"):
+                        with st.spinner("Saving and transcribing your voice answer..."):
+                            try:
+                                raw=backup_audio.getvalue()
+                                transcript=transcribe(backup_audio)
+                                mime=getattr(backup_audio,"type","audio/wav") or "audio/wav"
+                                name=getattr(backup_audio,"name","student-answer.wav")
+                                update(code,answer=transcript.strip(),audio_data=raw,audio_mime=mime,audio_name=name,result="",shared=0,status="answered")
+                                st.session_state[f"captured_transcript_{code}"]=transcript
+                                st.success("Your voice recording and transcript were sent privately to the teacher.")
+                            except Exception as e:
+                                st.error(f"Voice recording error: {e}")
                 else:
                     ans=st.text_area("Your answer",height=220)
                     if st.button("Submit Typed Answer to Teacher",type="primary"):
-                        if ans.strip(): update(code,answer=ans.strip(),result="",shared=0,status="answered"); st.success("Answer sent privately to teacher.")
+                        if ans.strip():
+                            update(code,answer=ans.strip(),audio_data=None,audio_mime=None,audio_name=None,result="",shared=0,status="answered")
+                            st.success("Answer sent privately to teacher.")
                         else: st.warning("Type your answer first.")
                 if st.button("Refresh Feedback"): st.rerun()
                 r=room(code)
