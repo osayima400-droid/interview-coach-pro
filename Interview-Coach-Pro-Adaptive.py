@@ -1,6 +1,6 @@
 import streamlit as st
 from openai import OpenAI
-import os, json, sqlite3, uuid, hashlib, html
+import os, json, sqlite3, uuid, hashlib, html, base64, io
 from datetime import datetime
 import streamlit.components.v1 as components
 
@@ -61,16 +61,11 @@ def livekit_token(room_code, identity, can_publish=True, can_subscribe=True):
     return url,token
 
 def live_audio_panel(room_code, role):
-    """
-    LiveKit handles immediate two-way audio.
-    Student can publish microphone audio; Teacher can subscribe and may also publish.
-    Existing st.audio_input remains the saved answer used for transcription/assessment.
-    """
+    """LiveKit two-way audio. Teacher uses the proven iframe implementation."""
     if not livekit_credentials_ok():
         st.warning("Live audio is not configured. Check LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET in Streamlit Secrets.")
         return
 
-    # Opaque identity: do not put student names/PII into LiveKit identity.
     identity=f"{role.lower()}-{uuid.uuid4().hex[:12]}"
     try:
         url,token=livekit_token(room_code,identity,can_publish=True,can_subscribe=True)
@@ -83,117 +78,151 @@ def live_audio_panel(room_code, role):
     role_label="Teacher" if role=="Teacher" else "Student"
 
     live_html=f"""
-    <!doctype html>
-    <html>
-    <head>
-      <meta charset="utf-8">
-      <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
-      <style>
-        body {{ font-family: Arial, sans-serif; margin: 0; }}
-        .box {{ border:1px solid #d9d9d9; border-radius:12px; padding:14px; }}
-        button {{ padding:10px 14px; margin:4px; border:0; border-radius:8px; cursor:pointer; font-weight:600; }}
-        #join {{ background:#16a34a; color:white; }}
-        #mute {{ background:#e5e7eb; }}
-        #leave {{ background:#dc2626; color:white; }}
-        #status {{ margin-top:8px; font-size:14px; }}
-        #remoteAudio audio {{ width:100%; margin-top:8px; }}
-      </style>
-    </head>
-    <body>
-      <div class="box">
-        <b>🎧 Live Interview Audio — {role_label}</b><br>
-        <button id="join">Join Live Audio</button>
-        <button id="mute" disabled>Mute</button>
-        <button id="leave" disabled>Leave</button>
-        <div id="status">Not connected</div>
-        <div id="remoteAudio"></div>
-      </div>
-      <script>
-        const LK = LivekitClient;
-        let room = null;
-        let micEnabled = true;
-
-        function status(msg) {{
-          document.getElementById('status').textContent = msg;
-        }}
-
-        function attachTrack(track) {{
-          if (track.kind === LK.Track.Kind.Audio) {{
-            const el = track.attach();
-            el.autoplay = true;
-            document.getElementById('remoteAudio').appendChild(el);
-            el.play().catch(() => {{}});
-          }}
-        }}
-
-        document.getElementById('join').onclick = async () => {{
-          try {{
-            status('Connecting…');
-            room = new LK.Room({{ adaptiveStream:true, dynacast:true }});
-
-            room.on(LK.RoomEvent.TrackSubscribed, (track) => {{
-              attachTrack(track);
-              status('Connected — live audio active');
-            }});
-
-            room.on(LK.RoomEvent.TrackUnsubscribed, (track) => {{
-              track.detach().forEach(el => el.remove());
-            }});
-
-            room.on(LK.RoomEvent.ParticipantConnected, () => {{
-              status('Connected — other participant joined');
-            }});
-
-            room.on(LK.RoomEvent.ParticipantDisconnected, () => {{
-              status('Connected — waiting for other participant');
-            }});
-
-            await room.connect("{safe_url}", "{safe_token}");
-
-            // Attach already-subscribed remote audio, if any.
-            room.remoteParticipants.forEach((participant) => {{
-              participant.trackPublications.forEach((publication) => {{
-                if (publication.track) attachTrack(publication.track);
-              }});
-            }});
-
-            await room.localParticipant.setMicrophoneEnabled(true);
-
-            document.getElementById('join').disabled = true;
-            document.getElementById('mute').disabled = false;
-            document.getElementById('leave').disabled = false;
-            status('Connected — microphone live');
-          }} catch (e) {{
-            status('Live audio error: ' + (e.message || e));
-          }}
-        }};
-
-        document.getElementById('mute').onclick = async () => {{
-          if (!room) return;
-          micEnabled = !micEnabled;
-          await room.localParticipant.setMicrophoneEnabled(micEnabled);
-          document.getElementById('mute').textContent = micEnabled ? 'Mute' : 'Unmute';
-          status(micEnabled ? 'Connected — microphone live' : 'Connected — microphone muted');
-        }};
-
-        document.getElementById('leave').onclick = async () => {{
-          if (!room) return;
-          await room.disconnect();
-          room = null;
-          document.getElementById('join').disabled = false;
-          document.getElementById('mute').disabled = true;
-          document.getElementById('leave').disabled = true;
-          status('Disconnected');
-        }};
-      </script>
-    </body>
-    </html>
-    """
+    <!doctype html><html><head><meta charset="utf-8">
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+    <style>
+      body {{ font-family: Arial,sans-serif; margin:0; }}
+      .box {{ border:1px solid #d9d9d9; border-radius:12px; padding:14px; }}
+      button {{ padding:10px 14px; margin:4px; border:0; border-radius:8px; cursor:pointer; font-weight:600; }}
+      #join {{ background:#16a34a;color:white; }} #mute {{ background:#e5e7eb; }} #leave {{ background:#dc2626;color:white; }}
+      #status {{ margin-top:8px;font-size:14px; }} #remoteAudio audio {{ width:100%;margin-top:8px; }}
+    </style></head><body><div class="box">
+      <b>🎧 Live Interview Audio — {role_label}</b><br>
+      <button id="join">Join Live Audio</button><button id="mute" disabled>Mute</button><button id="leave" disabled>Leave</button>
+      <div id="status">Not connected</div><div id="remoteAudio"></div>
+    </div><script>
+      const LK=LivekitClient; let room=null; let micEnabled=true;
+      function status(msg){{document.getElementById('status').textContent=msg;}}
+      function attachTrack(track){{if(track.kind===LK.Track.Kind.Audio){{const el=track.attach();el.autoplay=true;document.getElementById('remoteAudio').appendChild(el);el.play().catch(()=>{{}});}}}}
+      document.getElementById('join').onclick=async()=>{{try{{status('Connecting…');room=new LK.Room({{adaptiveStream:true,dynacast:true}});
+        room.on(LK.RoomEvent.TrackSubscribed,(track)=>{{attachTrack(track);status('Connected — live audio active');}});
+        room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
+        room.on(LK.RoomEvent.ParticipantConnected,()=>status('Connected — other participant joined'));
+        room.on(LK.RoomEvent.ParticipantDisconnected,()=>status('Connected — waiting for other participant'));
+        await room.connect("{safe_url}","{safe_token}");
+        room.remoteParticipants.forEach((p)=>p.trackPublications.forEach((pub)=>{{if(pub.track)attachTrack(pub.track);}}));
+        await room.localParticipant.setMicrophoneEnabled(true);
+        document.getElementById('join').disabled=true;document.getElementById('mute').disabled=false;document.getElementById('leave').disabled=false;status('Connected — microphone live');
+      }}catch(e){{status('Live audio error: '+(e.message||e));}}}};
+      document.getElementById('mute').onclick=async()=>{{if(!room)return;micEnabled=!micEnabled;await room.localParticipant.setMicrophoneEnabled(micEnabled);document.getElementById('mute').textContent=micEnabled?'Mute':'Unmute';status(micEnabled?'Connected — microphone live':'Connected — microphone muted');}};
+      document.getElementById('leave').onclick=async()=>{{if(!room)return;await room.disconnect();room=null;document.getElementById('join').disabled=false;document.getElementById('mute').disabled=true;document.getElementById('leave').disabled=true;status('Disconnected');}};
+    </script></body></html>"""
     components.html(live_html,height=170,scrolling=False)
+
+# Student component: one microphone stream is both published to LiveKit and recorded.
+STUDENT_AUDIO_HTML = """
+<div class="icp-box">
+  <b>🎧 Live Interview Audio + Answer Capture</b><br>
+  <button id="join">Join Live Audio</button>
+  <button id="start" disabled>Start Answer</button>
+  <button id="stop" disabled>Stop & Send Recording</button>
+  <button id="leave" disabled>Leave</button>
+  <div id="status">Not connected</div>
+  <div id="remote"></div>
+</div>
+"""
+STUDENT_AUDIO_CSS = """
+.icp-box{border:1px solid #d9d9d9;border-radius:12px;padding:14px;font-family:Arial,sans-serif}
+button{padding:10px 14px;margin:4px;border:0;border-radius:8px;cursor:pointer;font-weight:600}
+#join{background:#16a34a;color:white} #start{background:#2563eb;color:white} #stop{background:#dc2626;color:white} #leave{background:#6b7280;color:white}
+#status{margin-top:8px;font-size:14px} #remote audio{width:100%;margin-top:8px}
+"""
+STUDENT_AUDIO_JS = r"""
+export default function(component) {
+  const { data, parentElement, setTriggerValue } = component;
+  const q = (s) => parentElement.querySelector(s);
+  const join=q('#join'), start=q('#start'), stop=q('#stop'), leave=q('#leave'), status=q('#status'), remote=q('#remote');
+  let room=null, localTrack=null, recorder=null, chunks=[];
+  const say=(m)=>{ status.textContent=m; };
+
+  async function loadLK(){
+    if(window.LivekitClient) return window.LivekitClient;
+    await new Promise((resolve,reject)=>{
+      const existing=document.querySelector('script[data-icp-livekit]');
+      if(existing){ existing.addEventListener('load',resolve,{once:true}); existing.addEventListener('error',reject,{once:true}); return; }
+      const s=document.createElement('script'); s.dataset.icpLivekit='1'; s.src='https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js'; s.onload=resolve; s.onerror=reject; document.head.appendChild(s);
+    });
+    return window.LivekitClient;
+  }
+  function attach(track,LK){
+    if(track.kind===LK.Track.Kind.Audio){ const el=track.attach(); el.autoplay=true; remote.appendChild(el); el.play().catch(()=>{}); }
+  }
+  join.onclick=async()=>{
+    try{
+      say('Connecting…'); const LK=await loadLK(); room=new LK.Room({adaptiveStream:true,dynacast:true});
+      room.on(LK.RoomEvent.TrackSubscribed,(track)=>attach(track,LK));
+      room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
+      await room.connect(data.url,data.token);
+      room.remoteParticipants.forEach((p)=>p.trackPublications.forEach((pub)=>{if(pub.track)attach(pub.track,LK);}));
+      localTrack=await LK.createLocalAudioTrack(); await room.localParticipant.publishTrack(localTrack);
+      join.disabled=true; start.disabled=false; leave.disabled=false; say('Connected — teacher can hear you');
+    }catch(e){ say('Live audio error: '+(e.message||e)); }
+  };
+  start.onclick=()=>{
+    if(!localTrack) return;
+    try{
+      chunks=[]; const stream=new MediaStream([localTrack.mediaStreamTrack]);
+      const preferred=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';
+      recorder=new MediaRecorder(stream,{mimeType:preferred});
+      recorder.ondataavailable=(e)=>{if(e.data && e.data.size)chunks.push(e.data);};
+      recorder.onstop=()=>{
+        const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'}); const reader=new FileReader();
+        reader.onloadend=()=>{ setTriggerValue('recording',{data_url:reader.result,mime:blob.type,size:blob.size}); say('Recording captured — sending for transcription…'); };
+        reader.readAsDataURL(blob);
+      };
+      recorder.start(1000); start.disabled=true; stop.disabled=false; say('Recording answer — teacher is hearing you live');
+    }catch(e){ say('Recording error: '+(e.message||e)); }
+  };
+  stop.onclick=()=>{ if(recorder && recorder.state!=='inactive'){ recorder.stop(); stop.disabled=true; start.disabled=false; } };
+  leave.onclick=async()=>{ try{ if(recorder&&recorder.state!=='inactive')recorder.stop(); if(localTrack)localTrack.stop(); if(room)await room.disconnect(); }finally{ room=null;localTrack=null;join.disabled=false;start.disabled=true;stop.disabled=true;leave.disabled=true;say('Disconnected'); } };
+  return ()=>{ try{ if(localTrack)localTrack.stop(); if(room)room.disconnect(); }catch(e){} };
+}
+"""
+
+try:
+    student_audio_component = st.components.v2.component(
+        "interview_coach_student_audio",
+        html=STUDENT_AUDIO_HTML,
+        css=STUDENT_AUDIO_CSS,
+        js=STUDENT_AUDIO_JS,
+    )
+except Exception:
+    student_audio_component = None
+
+def student_live_audio_capture(room_code):
+    if not livekit_credentials_ok():
+        st.warning("Live audio is not configured.")
+        return None
+    if student_audio_component is None:
+        st.error("This app needs Streamlit 1.51 or newer for single-stream live recording.")
+        return None
+    state_key=f"student_audio_identity_{room_code}"
+    if state_key not in st.session_state:
+        st.session_state[state_key]=f"student-{uuid.uuid4().hex[:12]}"
+    try:
+        url,token=livekit_token(room_code,st.session_state[state_key],can_publish=True,can_subscribe=True)
+    except Exception as e:
+        st.error(f"Live audio setup error: {e}"); return None
+    result=student_audio_component(
+        data={"url":str(url),"token":str(token)},
+        key=f"student_audio_{room_code}",
+        on_recording_change=lambda: None,
+    )
+    return getattr(result,"recording",None)
 
 def transcribe(audio):
     data=audio.getvalue()
     out=client().audio.transcriptions.create(model="gpt-4o-mini-transcribe",file=(getattr(audio,"name","answer.wav"),data,getattr(audio,"type","audio/wav")))
+    return out.text
+
+def transcribe_data_url(recording):
+    if not recording or not recording.get("data_url"):
+        return ""
+    header,b64=recording["data_url"].split(",",1)
+    data=base64.b64decode(b64)
+    mime=recording.get("mime") or "audio/webm"
+    ext="webm" if "webm" in mime else ("ogg" if "ogg" in mime else "wav")
+    out=client().audio.transcriptions.create(model="gpt-4o-mini-transcribe",file=(f"student-answer.{ext}",data,mime))
     return out.text
 
 def extract_upload(upload):
@@ -359,8 +388,21 @@ elif mode=="Student":
         if not r: st.error("Room not found.")
         else:
             st.markdown("### 🎧 Live Interview Audio")
-            st.caption("Press Join Live Audio and allow microphone access. Your teacher can hear you while you speak.")
-            live_audio_panel(code,"Student")
+            st.caption("Join once. When answering, press Start Answer, speak normally, then press Stop & Send Recording. Your teacher hears you live while the same microphone audio is captured for transcription.")
+            recording=student_live_audio_capture(code)
+            if recording:
+                rec_id=hashlib.sha256(str(recording.get("data_url","")).encode()).hexdigest()[:16]
+                if st.session_state.get(f"processed_recording_{code}") != rec_id:
+                    with st.spinner("Transcribing your answer..."):
+                        try:
+                            transcript=transcribe_data_url(recording)
+                            st.session_state[f"captured_transcript_{code}"]=transcript
+                            st.session_state[f"processed_recording_{code}"]=rec_id
+                            if transcript.strip():
+                                update(code,answer=transcript.strip(),result="",shared=0,status="answered")
+                                st.success("Your recorded answer was transcribed and sent privately to the teacher.")
+                        except Exception as e:
+                            st.error(f"Transcription error: {e}")
 
             if not r["question"]:
                 st.info("Waiting for teacher to send a question.")
@@ -368,21 +410,17 @@ elif mode=="Student":
             else:
                 st.write(f"**Role:** {r['role']} | **{r['band']}**")
                 st.markdown("### Interview Question"); st.info(r["question"])
-                method=st.radio("Answer using",["🎙️ Microphone","⌨️ Type"],horizontal=True)
-                if method=="🎙️ Microphone":
-                    st.caption("Live Audio lets the teacher hear you immediately. Record below as well so the app can save/transcribe your answer for AI assessment.")
-                    audio=st.audio_input("Record answer for transcript and assessment")
-                    if audio:
-                        st.audio(audio)
-                        if st.button("Transcribe My Answer"):
-                            with st.spinner("Transcribing..."):
-                                try: st.session_state.transcript=transcribe(audio)
-                                except Exception as e: st.error(f"Transcription error: {e}")
-                    ans=st.text_area("Review your transcript",value=st.session_state.get("transcript",""),height=220)
-                else: ans=st.text_area("Your answer",height=220)
-                if st.button("Submit Answer to Teacher",type="primary"):
-                    if ans.strip(): update(code,answer=ans.strip(),result="",shared=0,status="answered"); st.success("Answer sent privately to teacher.")
-                    else: st.warning("Record or type your answer first.")
+                method=st.radio("Answer using",["🎙️ Live microphone","⌨️ Type"],horizontal=True)
+                if method=="🎙️ Live microphone":
+                    ans=st.text_area("Captured transcript",value=st.session_state.get(f"captured_transcript_{code}",r["answer"] or ""),height=220,help="The transcript appears here after Stop & Send Recording.")
+                    if ans.strip() and ans.strip() != (r["answer"] or "").strip():
+                        if st.button("Send Edited Transcript to Teacher",type="primary"):
+                            update(code,answer=ans.strip(),result="",shared=0,status="answered"); st.success("Edited transcript sent privately to teacher.")
+                else:
+                    ans=st.text_area("Your answer",height=220)
+                    if st.button("Submit Typed Answer to Teacher",type="primary"):
+                        if ans.strip(): update(code,answer=ans.strip(),result="",shared=0,status="answered"); st.success("Answer sent privately to teacher.")
+                        else: st.warning("Type your answer first.")
                 if st.button("Refresh Feedback"): st.rerun()
                 r=room(code)
                 if r["result"] and r["shared"]: st.divider(); st.header("📋 Teacher-Shared Feedback"); show(json.loads(r["result"]))
