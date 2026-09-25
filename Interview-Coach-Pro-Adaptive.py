@@ -129,7 +129,7 @@ button{padding:10px 14px;margin:4px;border:0;border-radius:8px;cursor:pointer;fo
 """
 STUDENT_AUDIO_JS = r"""
 export default function(component) {
-  const { data, parentElement, setTriggerValue } = component;
+  const { data, parentElement, setStateValue } = component;
   const q = (s) => parentElement.querySelector(s);
   const join=q('#join'), start=q('#start'), stop=q('#stop'), leave=q('#leave'), status=q('#status'), remote=q('#remote');
   let room=null, localTrack=null, recorder=null, chunks=[];
@@ -161,13 +161,17 @@ export default function(component) {
   start.onclick=()=>{
     if(!localTrack) return;
     try{
-      chunks=[]; const stream=new MediaStream([localTrack.mediaStreamTrack]);
-      const preferred=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus':'audio/webm';
-      recorder=new MediaRecorder(stream,{mimeType:preferred});
+      chunks=[];
+      const sourceTrack=localTrack.mediaStreamTrack;
+      if(!sourceTrack){ throw new Error('Microphone track is unavailable. Leave and rejoin live audio.'); }
+      const stream=new MediaStream([sourceTrack]);
+      const candidates=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4'];
+      const preferred=candidates.find(t=>window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+      recorder=preferred ? new MediaRecorder(stream,{mimeType:preferred}) : new MediaRecorder(stream);
       recorder.ondataavailable=(e)=>{if(e.data && e.data.size)chunks.push(e.data);};
       recorder.onstop=()=>{
         const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'}); const reader=new FileReader();
-        reader.onloadend=()=>{ setTriggerValue('recording',{data_url:reader.result,mime:blob.type,size:blob.size}); say('Recording captured — sending for transcription…'); };
+        reader.onloadend=()=>{ setStateValue('recording',{data_url:reader.result,mime:blob.type,size:blob.size}); say('Recording captured — sending for transcription…'); };
         reader.readAsDataURL(blob);
       };
       recorder.start(1000); start.disabled=true; stop.disabled=false; say('Recording answer — teacher is hearing you live');
@@ -206,6 +210,7 @@ def student_live_audio_capture(room_code):
     result=student_audio_component(
         data={"url":str(url),"token":str(token)},
         key=f"student_audio_{room_code}",
+        default={"recording": None},
         on_recording_change=lambda: None,
     )
     return getattr(result,"recording",None)
