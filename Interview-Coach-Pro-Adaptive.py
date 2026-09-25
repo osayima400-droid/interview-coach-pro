@@ -163,11 +163,7 @@ export default function(component) {
     chunks=[];
     say('Starting answer recording...');
 
-    const answerStream=await navigator.mediaDevices.getUserMedia({
-      audio:true,
-      video:false
-    });
-
+    const answerstream=new mediastream(localTrack.mediastreamTrack]);
     const candidates=[
       'audio/webm;codecs=opus',
       'audio/webm',
