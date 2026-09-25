@@ -158,26 +158,67 @@ export default function(component) {
       join.disabled=true; start.disabled=false; leave.disabled=false; say('Connected — teacher can hear you');
     }catch(e){ say('Live audio error: '+(e.message||e)); }
   };
-  start.onclick=()=>{
-    if(!localTrack) return;
-    try{
-      chunks=[];
-      const sourceTrack=localTrack.mediaStreamTrack;
-      if(!sourceTrack){ throw new Error('Microphone track is unavailable. Leave and rejoin live audio.'); }
-      const stream=new MediaStream([sourceTrack]);
-      const candidates=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4'];
-      const preferred=candidates.find(t=>window.MediaRecorder && MediaRecorder.isTypeSupported(t));
-      recorder=preferred ? new MediaRecorder(stream,{mimeType:preferred}) : new MediaRecorder(stream);
-      recorder.ondataavailable=(e)=>{if(e.data && e.data.size)chunks.push(e.data);};
-      recorder.onstop=()=>{
-        const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'}); const reader=new FileReader();
-        reader.onloadend=()=>{ setStateValue('recording',{data_url:reader.result,mime:blob.type,size:blob.size}); say('Recording captured — sending for transcription…'); };
-        reader.readAsDataURL(blob);
+  start.onclick=async()=>{
+  try{
+    chunks=[];
+    say('Starting answer recording...');
+
+    const answerStream=await navigator.mediaDevices.getUserMedia({
+      audio:true,
+      video:false
+    });
+
+    const candidates=[
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/ogg;codecs=opus',
+      'audio/mp4'
+    ];
+
+    const preferred=candidates.find(t=>
+      window.MediaRecorder &&
+      MediaRecorder.isTypeSupported(t)
+    );
+
+    recorder=preferred
+      ? new MediaRecorder(answerStream,{mimeType:preferred})
+      : new MediaRecorder(answerStream);
+
+    recorder.ondataavailable=(e)=>{
+      if(e.data && e.data.size){
+        chunks.push(e.data);
+      }
+    };
+
+    recorder.onstop=()=>{
+      const blob=new Blob(chunks,{
+        type:recorder.mimeType || 'audio/webm'
+      });
+
+      const reader=new FileReader();
+
+      reader.onloadend=()=>{
+        setStateValue('recording',{
+          data_url:reader.result,
+          mime:blob.type,
+          size:blob.size
+        });
+        say('Answer recorded and sent.');
       };
-      recorder.start(1000); start.disabled=true; stop.disabled=false; say('Recording answer — teacher is hearing you live');
-    }catch(e){ say('Recording error: '+(e.message||e)); }
-  };
-  stop.onclick=()=>{ if(recorder && recorder.state!=='inactive'){ recorder.stop(); stop.disabled=true; start.disabled=false; } };
+
+      reader.readAsDataURL(blob);
+      answerStream.getTracks().forEach(track=>track.stop());
+    };
+
+    recorder.start(1000);
+    start.disabled=true;
+    stop.disabled=false;
+    say('Recording answer — teacher can still hear you live');
+
+  }catch(e){
+    say('Recording error: '+(e.message||e));
+  }
+};  stop.onclick=()=>{ if(recorder && recorder.state!=='inactive'){ recorder.stop(); stop.disabled=true; start.disabled=false; } };
   leave.onclick=async()=>{ try{ if(recorder&&recorder.state!=='inactive')recorder.stop(); if(localTrack)localTrack.stop(); if(room)await room.disconnect(); }finally{ room=null;localTrack=null;join.disabled=false;start.disabled=true;stop.disabled=true;leave.disabled=true;say('Disconnected'); } };
   return ()=>{ try{ if(localTrack)localTrack.stop(); if(room)room.disconnect(); }catch(e){} };
 }
