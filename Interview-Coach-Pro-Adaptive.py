@@ -308,154 +308,187 @@ def create_realtime_client_secret(instructions, voice="marin"):
     return ephemeral
 
 
+
+def get_teacher_remote_controls(room):
+    """Return teacher-owned student-room controls without changing existing interview data."""
+    defaults = {
+        "interview_running": False,
+        "interview_paused": False,
+        "natural_voice_enabled": True,
+        "ai_muted": False,
+        "command": "",
+        "command_id": 0,
+    }
+    current = room.get("teacher_remote_controls") or {}
+    defaults.update(current)
+    return defaults
+
+
+def set_teacher_remote_controls(room, **updates):
+    """Persist teacher controls in the room so the student room follows them."""
+    controls = get_teacher_remote_controls(room)
+    controls.update(updates)
+    room["teacher_remote_controls"] = controls
+    save_room(room)
+    return controls
+
+
+def teacher_student_room_remote_panel(room):
+    """Teacher-side remote control panel for the student's interview room."""
+    st.markdown("### 🎛️ Student Interview Room — Teacher Remote Control")
+    st.caption(
+        "These controls govern the student's interview flow. "
+        "The student keeps only browser microphone permission and emergency disconnect controls."
+    )
+    c = get_teacher_remote_controls(room)
+
+    a, b, c1 = st.columns(3)
+    with a:
+        if st.button("▶️ Start Student Interview", use_container_width=True):
+            set_teacher_remote_controls(
+                room, interview_running=True, interview_paused=False,
+                command="start", command_id=int(c["command_id"]) + 1
+            )
+            st.success("Student interview started.")
+            st.rerun()
+    with b:
+        pause_label = "▶️ Resume Student" if c["interview_paused"] else "⏸️ Pause Student"
+        if st.button(pause_label, use_container_width=True):
+            set_teacher_remote_controls(
+                room, interview_paused=not c["interview_paused"],
+                command="resume" if c["interview_paused"] else "pause",
+                command_id=int(c["command_id"]) + 1
+            )
+            st.rerun()
+    with c1:
+        if st.button("⏹️ End Student Interview", use_container_width=True):
+            set_teacher_remote_controls(
+                room, interview_running=False, interview_paused=False,
+                command="end", command_id=int(c["command_id"]) + 1
+            )
+            st.warning("Student interview ended.")
+            st.rerun()
+
+    d, e, f = st.columns(3)
+    with d:
+        if st.button("➡️ Next Question", use_container_width=True):
+            set_teacher_remote_controls(
+                room, command="next_question",
+                command_id=int(c["command_id"]) + 1
+            )
+            st.rerun()
+    with e:
+        if st.button("🔁 Repeat Question", use_container_width=True):
+            set_teacher_remote_controls(
+                room, command="repeat_question",
+                command_id=int(c["command_id"]) + 1
+            )
+            st.rerun()
+    with f:
+        if st.button("❓ Ask AI Follow-up", use_container_width=True):
+            set_teacher_remote_controls(
+                room, command="follow_up",
+                command_id=int(c["command_id"]) + 1
+            )
+            st.rerun()
+
+    g, h = st.columns(2)
+    with g:
+        natural = st.toggle(
+            "🌐 Allow Natural Live Voice in student room",
+            value=bool(c["natural_voice_enabled"]),
+            key=f"remote_voice_{room.get('code','')}"
+        )
+    with h:
+        ai_muted = st.toggle(
+            "🔇 Mute AI interviewer",
+            value=bool(c["ai_muted"]),
+            key=f"remote_ai_mute_{room.get('code','')}"
+        )
+
+    if natural != c["natural_voice_enabled"] or ai_muted != c["ai_muted"]:
+        set_teacher_remote_controls(
+            room, natural_voice_enabled=natural, ai_muted=ai_muted,
+            command="settings_changed", command_id=int(c["command_id"]) + 1
+        )
+
+    state = get_teacher_remote_controls(room)
+    status = "RUNNING" if state["interview_running"] else "STOPPED"
+    if state["interview_paused"]:
+        status = "PAUSED"
+    st.info(f"Student interview status: **{status}**")
+
+
+def student_remote_control_status(room):
+    """Student-facing status only; private teacher settings stay hidden."""
+    c = get_teacher_remote_controls(room)
+    if not c["interview_running"]:
+        st.info("⏳ Waiting for the teacher to start your interview.")
+        return c, False
+    if c["interview_paused"]:
+        st.warning("⏸️ The teacher has paused the interview. Please wait.")
+        return c, False
+    if c["ai_muted"]:
+        st.info("🔇 The AI interviewer is temporarily muted by the teacher.")
+    return c, True
+
+
 def live_voice_component(client_secret, first_question, room_code, voice="marin"):
-    """Three-way live panel: AI <-> student <-> teacher, using Realtime + the existing LiveKit room."""
+    """Natural hands-free browser interview using WebRTC and automatic turn detection."""
     secret_js = json.dumps(client_secret)
     q_js = json.dumps(first_question or "")
-
-    lk_url = ""
-    lk_token = ""
-    if livekit_credentials_ok():
-        try:
-            lk_url, lk_token = livekit_token(
-                room_code,
-                f"ai-bridge-{uuid.uuid4().hex[:10]}",
-                can_publish=True,
-                can_subscribe=True,
-            )
-        except Exception:
-            lk_url, lk_token = "", ""
-
-    lk_url_js = json.dumps(str(lk_url or ""))
-    lk_token_js = json.dumps(str(lk_token or ""))
+    room_js = json.dumps(room_code or "")
 
     live_html = f"""
     <div style="font-family:Arial,sans-serif;border:1px solid #555;border-radius:14px;padding:14px">
-      <div style="font-size:18px;font-weight:700">🎙️ Three-Way British-English Live Interview</div>
+      <div style="font-size:18px;font-weight:700">🎙️ British-English Live AI Interviewer</div>
       <div id="status" style="margin:8px 0">Ready. Press Start once.</div>
       <button id="start" style="padding:10px 15px">▶ Start live interview</button>
       <button id="stop" disabled style="padding:10px 15px;margin-left:6px">■ End & disconnect</button>
       <div id="turn" style="margin-top:10px;font-size:14px">
-        AI, student and teacher can take part in the same live interview.
+        When you finish speaking, the interviewer will respond automatically.
       </div>
-      <div id="panel" style="margin-top:8px;font-size:13px">Teacher bridge: waiting</div>
       <audio id="remoteAudio" autoplay></audio>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
     <script>
     (() => {{
       const token = {secret_js};
       const firstQuestion = {q_js};
-      const lkUrl = {lk_url_js};
-      const lkToken = {lk_token_js};
-
+      const room = {room_js};
       const status = document.getElementById("status");
       const turn = document.getElementById("turn");
-      const panel = document.getElementById("panel");
       const start = document.getElementById("start");
       const stop = document.getElementById("stop");
       const remoteAudio = document.getElementById("remoteAudio");
 
-      let pc = null, dc = null, mic = null, lkRoom = null;
-      let audioCtx = null, mixDest = null, aiPublished = null;
-      let studentMicSource = null;
-      const teacherSources = new Map();
+      let pc = null, dc = null, mic = null;
 
-      async function connectPanelBridge() {{
-        if (!lkUrl || !lkToken || !window.LivekitClient) {{
-          panel.textContent = "Teacher bridge unavailable — check LiveKit configuration.";
-          return;
-        }}
-        const LK = window.LivekitClient;
-        lkRoom = new LK.Room({{adaptiveStream:true,dynacast:true}});
-
-        lkRoom.on(LK.RoomEvent.TrackSubscribed, (track, publication, participant) => {{
-          if (track.kind !== LK.Track.Kind.Audio) return;
-          // The teacher's microphone is mixed into the audio sent to the AI.
-          if ((participant.identity || "").startsWith("teacher-") && track.mediaStreamTrack && audioCtx && mixDest) {{
-            try {{
-              const stream = new MediaStream([track.mediaStreamTrack]);
-              const source = audioCtx.createMediaStreamSource(stream);
-              source.connect(mixDest);
-              teacherSources.set(participant.identity, source);
-              panel.textContent = "Teacher connected — teacher can hear and speak into the interview.";
-            }} catch(e) {{}}
-          }}
-        }});
-
-        lkRoom.on(LK.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {{
-          const source = teacherSources.get(participant.identity);
-          if (source) {{
-            try {{ source.disconnect(); }} catch(e) {{}}
-            teacherSources.delete(participant.identity);
-          }}
-        }});
-
-        lkRoom.on(LK.RoomEvent.ParticipantConnected, (p) => {{
-          if ((p.identity || "").startsWith("teacher-"))
-            panel.textContent = "Teacher connected — live panel active.";
-        }});
-
-        await lkRoom.connect(lkUrl, lkToken);
-        panel.textContent = "Teacher bridge connected — waiting for teacher audio if teacher has not joined yet.";
-      }}
-
-      async function publishAIToTeacher(track) {{
-        if (!lkRoom || !track || aiPublished) return;
-        try {{
-          aiPublished = await lkRoom.localParticipant.publishTrack(track.clone(), {{
-            name: "AI Interviewer",
-            source: window.LivekitClient.Track.Source.Microphone
-          }});
-          panel.textContent = "Teacher connected to AI audio — three-way panel active.";
-        }} catch(e) {{
-          panel.textContent = "Teacher bridge connected, but AI audio sharing failed: " + (e.message || e);
-        }}
-      }}
-
-      async function disconnect() {{
+      function disconnect() {{
         if (mic) mic.getTracks().forEach(t => t.stop());
         if (dc) {{ try {{ dc.close(); }} catch(e) {{}} }}
         if (pc) {{ try {{ pc.close(); }} catch(e) {{}} }}
-        if (lkRoom) {{ try {{ await lkRoom.disconnect(); }} catch(e) {{}} }}
-        teacherSources.forEach(s => {{ try {{ s.disconnect(); }} catch(e) {{}} }});
-        teacherSources.clear();
-        if (studentMicSource) {{ try {{ studentMicSource.disconnect(); }} catch(e) {{}} }}
-        if (audioCtx) {{ try {{ await audioCtx.close(); }} catch(e) {{}} }}
-        mic = null; dc = null; pc = null; lkRoom = null; audioCtx = null; mixDest = null;
-        aiPublished = null; studentMicSource = null;
+        mic = null; dc = null; pc = null;
         start.disabled = false;
         stop.disabled = true;
       }}
 
       start.onclick = async () => {{
         start.disabled = true;
-        status.textContent = "Connecting secure three-way interview…";
+        status.textContent = "Connecting securely…";
         try {{
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          await audioCtx.resume();
-          mixDest = audioCtx.createMediaStreamDestination();
-
-          mic = await navigator.mediaDevices.getUserMedia({{audio:true}});
-          studentMicSource = audioCtx.createMediaStreamSource(mic);
-          studentMicSource.connect(mixDest);
-
-          await connectPanelBridge();
-
           pc = new RTCPeerConnection();
           pc.ontrack = e => {{
             remoteAudio.srcObject = e.streams[0];
-            const t = e.track || (e.streams[0] && e.streams[0].getAudioTracks()[0]);
-            if (t) publishAIToTeacher(t);
           }};
 
-          // Send the mixed student + teacher panel audio to the AI.
-          mixDest.stream.getAudioTracks().forEach(track => pc.addTrack(track, mixDest.stream));
+          mic = await navigator.mediaDevices.getUserMedia({{audio:true}});
+          mic.getTracks().forEach(track => pc.addTrack(track, mic));
 
           dc = pc.createDataChannel("oai-events");
+
           dc.onopen = () => {{
-            status.textContent = "Connected — AI, student and teacher live";
+            status.textContent = "Connected — live interview in progress";
             stop.disabled = false;
             const opening = firstQuestion
               ? "Begin now. Give a brief professional welcome, then ask exactly this first interview question: " + firstQuestion
@@ -470,11 +503,11 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
             let e;
             try {{ e = JSON.parse(ev.data); }} catch (_) {{ return; }}
             if (e.type === "input_audio_buffer.speech_started") {{
-              turn.textContent = "🎤 Student/teacher speaking…";
+              turn.textContent = "🎤 Listening…";
             }} else if (e.type === "input_audio_buffer.speech_stopped") {{
-              turn.textContent = "🧠 Speaker finished — AI is responding…";
+              turn.textContent = "🧠 Answer complete — interviewer is responding…";
             }} else if (e.type === "response.done") {{
-              turn.textContent = "🎤 Student or teacher may speak.";
+              turn.textContent = "🎤 Your turn.";
             }} else if (e.type === "error") {{
               status.textContent = "Live Voice error: " + (e.error?.message || "Unknown error");
             }}
@@ -482,6 +515,7 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
 
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
+
           const r = await fetch("https://api.openai.com/v1/realtime/calls", {{
             method: "POST",
             body: offer.sdp,
@@ -490,27 +524,27 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
               "Content-Type": "application/sdp"
             }}
           }});
+
           if (!r.ok) throw new Error(await r.text());
           const answer = await r.text();
           await pc.setRemoteDescription({{type:"answer", sdp:answer}});
         }} catch (err) {{
           status.textContent = "Connection failed: " + err.message;
-          await disconnect();
+          disconnect();
         }}
       }};
 
-      stop.onclick = async () => {{
-        await disconnect();
+      stop.onclick = () => {{
+        disconnect();
         status.textContent = "Disconnected. Live Voice usage has stopped.";
         turn.textContent = "Interview connection closed.";
-        panel.textContent = "Teacher bridge disconnected.";
       }};
 
-      window.addEventListener("beforeunload", () => {{ disconnect(); }});
+      window.addEventListener("beforeunload", disconnect);
     }})();
     </script>
     """
-    components.html(live_html, height=245)
+    components.html(live_html, height=220)
 
 
 def transcribe(audio):
@@ -939,8 +973,8 @@ if mode=="Teacher":
             logout_button("🚪 Log Out of Teacher Room")
             st.divider(); st.subheader(f"Live Room: {code}")
             st.write(f"**Student:** {r['student'] or 'Not named'} | **Role:** {r['role']} | **{r['band']}**")
-            st.markdown("### 🎧 Teacher Live Panel — AI + Student")
-            st.caption("Join this audio panel and keep your microphone live when you want to contribute. You will hear the student and, during Natural Live Interview, the AI interviewer. Use Mute when observing silently; Unmute to ask your own follow-up or contribute.")
+            st.markdown("### 🎧 Live Interview Audio")
+            st.caption("Live audio reconnects automatically while you remain in this room. Use Leave only when you intentionally want to disconnect audio.")
             live_audio_panel(code,"Teacher")
 
             st.markdown("### 🎛️ Teacher Mock Interview Controls")
