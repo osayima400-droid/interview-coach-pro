@@ -10,7 +10,7 @@ DB="interview_coach.db"
 def conn():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
     c.execute("""CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY,pin TEXT,student TEXT,role TEXT,band TEXT,vacancy TEXT,question TEXT,answer TEXT,result TEXT,shared INTEGER DEFAULT 0,status TEXT,updated TEXT)""")
-    for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT", "audio_data BLOB", "audio_mime TEXT", "audio_name TEXT"]:
+    for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT", "audio_data BLOB", "audio_mime TEXT", "audio_name TEXT", "teacher_token TEXT"]:
         try: c.execute(f"ALTER TABLE rooms ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     c.commit(); return c
@@ -94,7 +94,7 @@ def live_audio_panel(room_code, role):
       const LK=LivekitClient; let room=null; let micEnabled=true;
       function status(msg){{document.getElementById('status').textContent=msg;}}
       function attachTrack(track){{if(track.kind===LK.Track.Kind.Audio){{const el=track.attach();el.autoplay=true;document.getElementById('remoteAudio').appendChild(el);el.play().catch(()=>{{}});}}}}
-      document.getElementById('join').onclick=async()=>{{try{{status('Connecting…');room=new LK.Room({{adaptiveStream:true,dynacast:true}});
+      async function autoJoin(){{try{{status('Reconnecting automatically…');room=new LK.Room({{adaptiveStream:true,dynacast:true}});
         room.on(LK.RoomEvent.TrackSubscribed,(track)=>{{attachTrack(track);status('Connected — live audio active');}});
         room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
         room.on(LK.RoomEvent.ParticipantConnected,()=>status('Connected — other participant joined'));
@@ -103,7 +103,9 @@ def live_audio_panel(room_code, role):
         room.remoteParticipants.forEach((p)=>p.trackPublications.forEach((pub)=>{{if(pub.track)attachTrack(pub.track);}}));
         await room.localParticipant.setMicrophoneEnabled(true);
         document.getElementById('join').disabled=true;document.getElementById('mute').disabled=false;document.getElementById('leave').disabled=false;status('Connected — microphone live');
-      }}catch(e){{status('Live audio error: '+(e.message||e));}}}};
+      }}catch(e){{status('Live audio error: '+(e.message||e));}}}}
+      document.getElementById('join').onclick=autoJoin;
+      autoJoin();
       document.getElementById('mute').onclick=async()=>{{if(!room)return;micEnabled=!micEnabled;await room.localParticipant.setMicrophoneEnabled(micEnabled);document.getElementById('mute').textContent=micEnabled?'Mute':'Unmute';status(micEnabled?'Connected — microphone live':'Connected — microphone muted');}};
       document.getElementById('leave').onclick=async()=>{{if(!room)return;await room.disconnect();room=null;document.getElementById('join').disabled=false;document.getElementById('mute').disabled=true;document.getElementById('leave').disabled=true;status('Disconnected');}};
     </script></body></html>"""
@@ -165,9 +167,10 @@ export default function(component) {
   function attach(track,LK){
     if(track.kind===LK.Track.Kind.Audio){ const el=track.attach(); el.autoplay=true; remote.appendChild(el); el.play().catch(()=>{}); }
   }
-  join.onclick=async()=>{
+  async function autoJoin(){
     try{
-      say('Connecting…'); const LK=await loadLK(); room=new LK.Room({adaptiveStream:true,dynacast:true});
+      if(room) return;
+      say('Reconnecting automatically…'); const LK=await loadLK(); room=new LK.Room({adaptiveStream:true,dynacast:true});
       room.on(LK.RoomEvent.TrackSubscribed,(track)=>attach(track,LK));
       room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
       await room.connect(data.url,data.token);
@@ -175,7 +178,9 @@ export default function(component) {
       localTrack=await LK.createLocalAudioTrack(); await room.localParticipant.publishTrack(localTrack);
       join.disabled=true; start.disabled=false; leave.disabled=false; say('Connected — teacher can hear you');
     }catch(e){ say('Live audio error: '+(e.message||e)); }
-  };
+  }
+  join.onclick=autoJoin;
+  autoJoin();
   start.onclick=()=>{
     if(!localTrack || !localTrack.mediaStreamTrack){
       say('Press Join Live Audio first.');
@@ -440,9 +445,41 @@ def show(r):
     st.markdown("### Likely follow-up questions")
     for x in r.get("follow_up_questions",[]): st.write("•",x)
 
+def persistent_login_params():
+    """Restore Teacher/Student room access from this browser's URL until the user logs out."""
+    try:
+        saved_mode=st.query_params.get("mode", "")
+        saved_code=st.query_params.get("room", "").upper().strip()
+        saved_token=st.query_params.get("token", "")
+    except Exception:
+        return "", "", ""
+    return saved_mode, saved_code, saved_token
+
+def remember_teacher(code, token):
+    st.query_params["mode"]="Teacher"
+    st.query_params["room"]=code
+    st.query_params["token"]=token
+
+def remember_student(code):
+    st.query_params["mode"]="Student"
+    st.query_params["room"]=code
+    if "token" in st.query_params:
+        del st.query_params["token"]
+
+def logout_button(label="Log Out"):
+    if st.sidebar.button(label, type="secondary"):
+        for k in ["code","pin","teacher_token"]:
+            st.session_state.pop(k, None)
+        st.query_params.clear()
+        st.rerun()
+
+saved_mode,saved_code,saved_token=persistent_login_params()
+
 st.title("🎓 Interview Coach Pro")
 st.caption("Teacher-controlled interview room • Live two-way audio • Timed voice capture • NHS-style evidence scoring • Vacancy-specific AI assessment")
-mode=st.sidebar.radio("Open as",["Teacher","Student","Student Practice","Mock Interview"])
+mode_options=["Teacher","Student","Student Practice","Mock Interview"]
+default_mode=saved_mode if saved_mode in ["Teacher","Student"] else "Teacher"
+mode=st.sidebar.radio("Open as",mode_options,index=mode_options.index(default_mode))
 
 if mode=="Teacher":
     st.header("👩‍🏫 Teacher Dashboard")
@@ -463,31 +500,46 @@ if mode=="Teacher":
                 code=uuid.uuid4().hex[:6].upper(); c=conn()
                 combined="\n\n".join(["JOB ADVERT:\n"+advert,"JOB DESCRIPTION:\n"+jd,"PERSON SPECIFICATION:\n"+ps,"APPLICATION FORM:\n"+application])
                 c.execute("INSERT INTO rooms(code,pin,student,role,band,vacancy,status,updated,job_advert,job_description,person_spec,application_form,question_bank) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(code,hp(pin),student,role,band,combined,"waiting",datetime.now().isoformat(),advert,jd,ps,application,""))
-                c.commit(); c.close(); st.session_state.code=code; st.session_state.pin=pin
+                teacher_token=uuid.uuid4().hex
+                c.execute("UPDATE rooms SET teacher_token=? WHERE code=?",(teacher_token,code))
+                c.commit(); c.close(); st.session_state.code=code; st.session_state.pin=pin; st.session_state.teacher_token=teacher_token
+                remember_teacher(code,teacher_token)
                 st.success(f"Room created. Student Code: {code}")
                 st.info("Give the student only this code. Keep your Teacher PIN private.")
     with t2:
         oc=st.text_input("Room code").upper().strip(); op=st.text_input("Teacher PIN",type="password",key="op")
         if st.button("Open Dashboard"):
             r=room(oc)
-            if r and r["pin"]==hp(op): st.session_state.code=oc; st.session_state.pin=op; st.rerun()
+            if r and r["pin"]==hp(op):
+                teacher_token=uuid.uuid4().hex
+                update(oc,teacher_token=teacher_token)
+                st.session_state.code=oc; st.session_state.pin=op; st.session_state.teacher_token=teacher_token
+                remember_teacher(oc,teacher_token)
+                st.rerun()
             else: st.error("Incorrect room code or Teacher PIN.")
-    code=st.session_state.get("code")
+    code=st.session_state.get("code") or (saved_code if saved_mode=="Teacher" else "")
     if code:
         r=room(code)
-        if r and r["pin"]==hp(st.session_state.get("pin","")):
+        pin_ok=bool(r and st.session_state.get("pin") and r["pin"]==hp(st.session_state.get("pin","")))
+        token_ok=bool(r and saved_token and r["teacher_token"] and saved_token==r["teacher_token"])
+        if pin_ok or token_ok:
+            st.session_state.code=code
+            logout_button("🚪 Log Out of Teacher Room")
             st.divider(); st.subheader(f"Live Room: {code}")
             st.write(f"**Student:** {r['student'] or 'Not named'} | **Role:** {r['role']} | **{r['band']}**")
             st.markdown("### 🎧 Live Interview Audio")
-            st.caption("Teacher and Student should each press Join Live Audio. Allow microphone access when the browser asks.")
+            st.caption("Live audio reconnects automatically while you remain in this room. Use Leave only when you intentionally want to disconnect audio.")
             live_audio_panel(code,"Teacher")
 
             st.markdown("### 🧠 Adaptive AI Question Bank")
-            nq=st.slider("Number of questions to generate",5,20,10)
-            if st.button("✨ Generate Questions from Advert + JD + PS + Application",type="primary"):
+            st.caption("No app-set question-bank limit: generate additional batches whenever you want. Existing questions are kept.")
+            nq=st.number_input("Questions to add in this batch",min_value=1,max_value=50,value=10,step=1)
+            if st.button("✨ Generate More Questions from Advert + JD + PS + Application",type="primary"):
                 with st.spinner("Reading the recruitment documents and building vacancy-specific questions..."):
                     try:
-                        bank=generate_questions(r["role"],r["band"],r["job_advert"] or "",r["job_description"] or "",r["person_spec"] or "",r["application_form"] or "",nq)
+                        existing=json.loads(r["question_bank"] or "[]")
+                        more=generate_questions(r["role"],r["band"],r["job_advert"] or "",r["job_description"] or "",r["person_spec"] or "",r["application_form"] or "",int(nq))
+                        bank=existing+more
                         update(code,question_bank=json.dumps(bank)); st.rerun()
                     except Exception as e: st.error(f"Question generation error: {e}")
             r=room(code); bank=json.loads(r["question_bank"] or "[]")
@@ -506,6 +558,7 @@ if mode=="Teacher":
                 if q.strip(): update(code,question=q.strip(),answer="",audio_data=None,audio_mime=None,audio_name=None,result="",shared=0,status="question_sent"); st.success("Only this question was sent to the student."); st.rerun()
             if c2.button("🔄 Refresh"): st.rerun()
             r=room(code); st.markdown("### Student answer")
+            st.caption("No app-set analysis limit: the teacher can analyse or re-analyse answers whenever needed; API/service limits and costs may still apply.")
             if r["audio_data"]:
                 st.markdown("#### 🔊 Student voice recording")
                 st.audio(bytes(r["audio_data"]), format=r["audio_mime"] or "audio/webm")
@@ -527,13 +580,17 @@ if mode=="Teacher":
 
 elif mode=="Student":
     st.header("🎤 Student Interview Room")
-    code=st.text_input("Enter Student Code").upper().strip()
+    initial_student_code=saved_code if saved_mode=="Student" else ""
+    code=st.text_input("Enter Student Code",value=initial_student_code).upper().strip()
     if code:
         r=room(code)
         if not r: st.error("Room not found.")
         else:
+            if saved_mode!="Student" or saved_code!=code:
+                remember_student(code)
+            logout_button("🚪 Log Out of Student Room")
             st.markdown("### 🎧 Live Interview Audio")
-            st.caption("Join once. When answering, press Start Answer, speak normally, then press Stop & Send Recording. Your teacher hears you live while the same microphone audio is captured for transcription.")
+            st.caption("Live audio reconnects automatically while you remain in this room. When answering, press Start Answer, speak normally, then press Stop & Send Recording. Use Leave only when you intentionally want to disconnect audio.")
             recording=student_live_audio_capture(code)
             if recording:
                 rec_id=hashlib.sha256(str(recording.get("data_url","")).encode()).hexdigest()[:16]
