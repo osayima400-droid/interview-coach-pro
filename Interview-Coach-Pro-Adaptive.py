@@ -729,8 +729,8 @@ if mode=="Teacher":
                     st.success("Result is visible to the student.")
                     if st.button("Make Result Private"): update(code,shared=0); st.rerun()
 
-elif mode=="Student":
-    st.header("🎤 Student Interview Room")
+elif mode in ["Student","Mock Interview"]:
+    st.header("🎤 Student Mock Interview Room" if mode=="Mock Interview" else "🎤 Student Interview Room")
     initial_student_code=saved_code if saved_mode=="Student" else ""
     code=st.text_input("Enter Student Code",value=initial_student_code).upper().strip()
     if code:
@@ -800,7 +800,7 @@ elif mode=="Student":
 
 else:
     st.header("🧑‍🎓 "+mode)
-    is_mock=(mode=="Mock Interview")
+    is_mock=False
     role=st.text_input("Role")
     band=st.selectbox("Band",["Band 2","Band 3","Band 4","Band 5","Band 6","Band 7","Other"])
     vacancy=st.text_area("Paste Job Advert + JD + Person Specification + Trust/Board values + relevant application evidence",height=220)
