@@ -309,84 +309,6 @@ def create_realtime_client_secret(instructions, voice="marin"):
 
 
 
-
-def teacher_listen_only_monitor(room_code):
-    """Teacher subscribes to the existing LiveKit room without publishing a microphone."""
-    if not livekit_credentials_ok():
-        st.warning("Teacher listening requires the existing LiveKit configuration.")
-        return
-
-    try:
-        lk_url, lk_token = livekit_token(
-            room_code,
-            f"teacher-listener-{uuid.uuid4().hex[:10]}",
-            can_publish=False,
-            can_subscribe=True,
-        )
-    except Exception as e:
-        st.error(f"Could not prepare teacher listening: {e}")
-        return
-
-    url_js = json.dumps(str(lk_url))
-    token_js = json.dumps(str(lk_token))
-    monitor_html = f"""
-    <div style="font-family:Arial,sans-serif;border:1px solid #555;border-radius:12px;padding:12px">
-      <b>🎧 Teacher Listen-Only Monitor</b>
-      <div id="listenStatus" style="margin:8px 0">Not connected.</div>
-      <button id="listenJoin">▶ Listen</button>
-      <button id="listenLeave" disabled>■ Stop listening</button>
-      <div style="font-size:12px;margin-top:8px">Your teacher microphone is not transmitted in this step.</div>
-      <div id="listenAudio"></div>
-    </div>
-    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
-    <script>
-    (() => {{
-      const LK = window.LivekitClient;
-      const url = {url_js};
-      const token = {token_js};
-      const status = document.getElementById("listenStatus");
-      const join = document.getElementById("listenJoin");
-      const leave = document.getElementById("listenLeave");
-      const audioBox = document.getElementById("listenAudio");
-      let room = null;
-
-      join.onclick = async () => {{
-        try {{
-          room = new LK.Room({{adaptiveStream:true,dynacast:true}});
-          room.on(LK.RoomEvent.TrackSubscribed, (track, publication, participant) => {{
-            if (track.kind === LK.Track.Kind.Audio) {{
-              const element = track.attach();
-              element.autoplay = true;
-              audioBox.appendChild(element);
-              status.textContent = "Listening to " + (participant.identity || "interview audio");
-            }}
-          }});
-          room.on(LK.RoomEvent.TrackUnsubscribed, (track) => {{
-            track.detach().forEach(el => el.remove());
-          }});
-          await room.connect(url, token);
-          status.textContent = "Connected. Waiting for interview audio…";
-          join.disabled = true;
-          leave.disabled = false;
-        }} catch (e) {{
-          status.textContent = "Listen connection failed: " + e.message;
-        }}
-      }};
-
-      leave.onclick = async () => {{
-        if (room) await room.disconnect();
-        room = null;
-        audioBox.innerHTML = "";
-        status.textContent = "Stopped listening.";
-        join.disabled = false;
-        leave.disabled = true;
-      }};
-    }})();
-    </script>
-    """
-    components.html(monitor_html, height=150)
-
-
 def get_teacher_remote_controls(room):
     """Return teacher-owned student-room controls without changing existing interview data."""
     defaults = {
@@ -777,7 +699,19 @@ def source_box(label,key):
 
 def generate_questions(role,band,advert,jd,ps,application,n):
     instructions="""You are an NHS/healthcare interview-panel question designer. Use ONLY the recruitment materials supplied. Generate realistic, vacancy-specific interview questions. Cross-reference the job advert, job description, person specification and candidate application. Prioritise essential criteria and core responsibilities; include relevant values, clinical/technical knowledge, safeguarding/safety, communication/teamwork, scenarios and motivation. Generate application-evidence follow-ups only where the application actually supports them. Do not invent candidate experience or requirements. Avoid duplicate/generic questions when specific evidence exists. Return JSON only as an object with key questions. questions is an array of objects with keys question, type, why_asked, source_basis, expected_concepts. type should be one of motivation, competency, behavioural_STAR, scenario, safeguarding, values, knowledge, clinical_technical, teamwork_leadership, application_followup."""
-    prompt=f"""ROLE: {role}\nBAND: {band}\nNUMBER OF QUESTIONS: {n}\n\nJOB ADVERT:\n{advert}\n\nJOB DESCRIPTION:\n{jd}\n\nPERSON SPECIFICATION:\n{ps}\n\nCANDIDATE APPLICATION FORM:\n{application}\n\nGenerate exactly {n} adaptive questions grounded in these materials."""
+    prompt=f"""
+STRICT MOCK-INTERVIEW SOURCE RULE:
+Every generated mock-interview question MUST be specifically grounded in the recruitment materials supplied by the TEACHER for THIS room:
+1) Job Advert,
+2) Job Description (JD),
+3) Person Specification (PS), and
+4) Candidate Application.
+Use the vacancy's own terminology, duties, essential/desirable criteria, qualifications, experience requirements, values, service context, and claims in the candidate's application.
+Do NOT introduce generic NHS questions, unrelated competencies, invented Trust/Board values, invented duties, or requirements that are not supported by those teacher-supplied materials.
+Application-based questions may test or clarify claims actually present in the supplied application.
+If one of the four source documents is absent or contains no usable text, do not invent content for it; generate only from the source material that is actually present.
+For each generated question, internally identify the supporting source category (Advert/JD/PS/Application) and the specific criterion or claim being tested.
+ROLE: {role}\nBAND: {band}\nNUMBER OF QUESTIONS: {n}\n\nJOB ADVERT:\n{advert}\n\nJOB DESCRIPTION:\n{jd}\n\nPERSON SPECIFICATION:\n{ps}\n\nCANDIDATE APPLICATION FORM:\n{application}\n\nGenerate exactly {n} adaptive questions grounded in these materials."""
     res=client().responses.create(model="gpt-5.6",instructions=instructions,input=prompt)
     text=res.output_text.strip()
     if text.startswith("```"): text=text.split("\n",1)[1].rsplit("```",1)[0].strip()
@@ -1051,7 +985,8 @@ if mode=="Teacher":
             logout_button("🚪 Log Out of Teacher Room")
             st.divider(); st.subheader(f"Live Room: {code}")
             st.write(f"**Student:** {r['student'] or 'Not named'} | **Role:** {r['role']} | **{r['band']}**")
-            st.markdown("### 🎧 Live Interview Audio")
+            st.markdown("### 🎧 Teacher Listen-Only — Step 1")
+            st.info("LISTEN-ONLY TEST: Join the existing room audio and keep the teacher microphone muted. First confirm that teacher-side room audio is connected before we add teacher speaking.")
             st.caption("Live audio reconnects automatically while you remain in this room. Use Leave only when you intentionally want to disconnect audio.")
             live_audio_panel(code,"Teacher")
 
