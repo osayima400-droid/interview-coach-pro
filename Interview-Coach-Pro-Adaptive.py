@@ -322,6 +322,8 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
       <div style="font-size:18px;font-weight:700">🎙️ British-English Live AI Interviewer</div>
       <div id="status" style="margin:8px 0">Ready. Press Start once.</div>
       <button id="start" style="padding:10px 15px">▶ Start live interview</button>
+      <button id="pause" disabled style="padding:10px 15px;margin-left:6px">⏸ Pause Live Voice</button>
+      <button id="resume" disabled style="padding:10px 15px;margin-left:6px">▶ Resume Live Voice</button>
       <button id="stop" disabled style="padding:10px 15px;margin-left:6px">■ End & disconnect</button>
       <div id="turn" style="margin-top:10px;font-size:14px">
         When you finish speaking, the interviewer will respond automatically.
@@ -339,12 +341,37 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
       const status = document.getElementById("status");
       const turn = document.getElementById("turn");
       const start = document.getElementById("start");
+      const pause = document.getElementById("pause");
+      const resume = document.getElementById("resume");
       const stop = document.getElementById("stop");
       const remoteAudio = document.getElementById("remoteAudio");
 
       let pc = null, dc = null, mic = null, lkRoom = null, lkMicTrack = null, aiPublishedTrack = null;
+      let responseWatchdog = null;
+
+      function clearResponseWatchdog() {{
+        if (responseWatchdog) {{ clearTimeout(responseWatchdog); responseWatchdog = null; }}
+      }}
+
+      function armResponseWatchdog() {{
+        clearResponseWatchdog();
+        responseWatchdog = setTimeout(() => {{
+          try {{
+            if (dc && dc.readyState === "open") {{
+              status.textContent = "Still connected — prompting interviewer to continue…";
+              dc.send(JSON.stringify({{
+                type: "response.create",
+                response: {{
+                  instructions: "Continue naturally from the current mock-interview conversation. Do not restart the interview or repeat the welcome. If the candidate has finished answering, respond with the appropriate follow-up or continue the teacher-controlled interview. Keep all questions grounded in the supplied vacancy and application materials."
+                }}
+              }}));
+            }}
+          }} catch (e) {{}}
+        }}, 18000);
+      }}
 
       function disconnect() {{
+        clearResponseWatchdog();
         if (mic) mic.getTracks().forEach(t => t.stop());
         if (dc) {{ try {{ dc.close(); }} catch(e) {{}} }}
         if (pc) {{ try {{ pc.close(); }} catch(e) {{}} }}
@@ -353,6 +380,8 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
         if (lkRoom) {{ try {{ lkRoom.disconnect(); }} catch(e) {{}} lkRoom=null; }}
         mic = null; dc = null; pc = null;
         start.disabled = false;
+        pause.disabled = true;
+        resume.disabled = true;
         stop.disabled = true;
       }}
 
@@ -406,6 +435,8 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
 
           dc.onopen = () => {{
             status.textContent = "Connected — live interview in progress";
+            pause.disabled = false;
+            resume.disabled = true;
             stop.disabled = false;
             const opening = firstQuestion
               ? "Begin now. Give a brief professional welcome, then ask exactly this first interview question: " + firstQuestion
@@ -423,9 +454,14 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
               turn.textContent = "🎤 Listening…";
             }} else if (e.type === "input_audio_buffer.speech_stopped") {{
               turn.textContent = "🧠 Answer complete — interviewer is responding…";
+              armResponseWatchdog();
+            }} else if (e.type === "response.created" || e.type === "response.output_audio.delta" || e.type === "response.audio.delta") {{
+              clearResponseWatchdog();
             }} else if (e.type === "response.done") {{
+              clearResponseWatchdog();
               turn.textContent = "🎤 Your turn.";
             }} else if (e.type === "error") {{
+              clearResponseWatchdog();
               status.textContent = "Live Voice error: " + (e.error?.message || "Unknown error");
             }}
           }};
@@ -449,6 +485,28 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
           status.textContent = "Connection failed: " + err.message;
           disconnect();
         }}
+      }};
+
+      pause.onclick = () => {{
+        clearResponseWatchdog();
+        if (mic) mic.getTracks().forEach(t => t.stop());
+        if (dc) {{ try {{ dc.close(); }} catch(e) {{}} }}
+        if (pc) {{ try {{ pc.close(); }} catch(e) {{}} }}
+        mic = null; dc = null; pc = null;
+        remoteAudio.srcObject = null;
+        pause.disabled = true;
+        resume.disabled = false;
+        start.disabled = true;
+        stop.disabled = false;
+        status.textContent = "Paused — paid Realtime connection stopped.";
+        turn.textContent = "Room, current question and interview state are preserved.";
+      }};
+
+      resume.onclick = () => {{
+        status.textContent = "Resuming live interview…";
+        resume.disabled = true;
+        start.disabled = false;
+        start.click();
       }};
 
       stop.onclick = () => {{
@@ -1266,6 +1324,10 @@ Maximum probes per question: {settings.get('max_probes',3)}
                                     st.warning(f"Teacher room audio is unavailable: {e}")
                                 live_voice_component(st.session_state["live_secret_"+code], q, code, settings.get("live_voice","marin"), lk_url, lk_token_value)
                                 st.caption("Live voice is metered only while a Realtime session is actually connected. The teacher can join the same room to hear the student and AI, and speak to the student.")
+                                if st.button("🔄 Continue Live Interview", key=f"renew_live_{code}",
+                                             help="If Live Voice stops responding during a long interview, this starts a fresh voice connection without changing the room, questions, teacher controls or mock-interview state."):
+                                    st.session_state.pop("live_secret_"+code, None)
+                                    st.rerun()
                             st.divider()
                             st.caption("Recorded-answer fallback")
 
