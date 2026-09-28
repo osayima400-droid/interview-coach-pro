@@ -96,16 +96,32 @@ def live_audio_panel(room_code, role):
       function status(msg){{document.getElementById('status').textContent=msg;}}
       function attachTrack(track){{if(track.kind===LK.Track.Kind.Audio){{const el=track.attach();el.autoplay=true;document.getElementById('remoteAudio').appendChild(el);el.play().catch(()=>{{}});}}}}
       async function autoJoin(){{try{{status('Reconnecting automatically…');room=new LK.Room({{adaptiveStream:true,dynacast:true}});
-        room.on(LK.RoomEvent.TrackSubscribed,(track)=>{{attachTrack(track);status('Connected — live audio active');}});
+        room.on(LK.RoomEvent.TrackSubscribed,(track)=>{{attachTrack(track);status('Connected — student audio active');}});
+        room.on(LK.RoomEvent.TrackPublished,(publication,participant)=>{{
+          try{{
+            if(publication.kind===LK.Track.Kind.Audio && !publication.isSubscribed) publication.setSubscribed(true);
+          }}catch(e){{}}
+        }});
         room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
         room.on(LK.RoomEvent.ParticipantConnected,()=>status('Connected — other participant joined'));
         room.on(LK.RoomEvent.ParticipantDisconnected,()=>status('Connected — waiting for other participant'));
         await room.connect("{safe_url}","{safe_token}");
-        room.remoteParticipants.forEach((p)=>p.trackPublications.forEach((pub)=>{{if(pub.track)attachTrack(pub.track);}}));
+        try{{if(room.startAudio)await room.startAudio();}}catch(e){{}}
+        room.remoteParticipants.forEach((p)=>p.trackPublications.forEach((pub)=>{{
+          try{{if(pub.kind===LK.Track.Kind.Audio && !pub.isSubscribed)pub.setSubscribed(true);}}catch(e){{}}
+          if(pub.track)attachTrack(pub.track);
+        }}));
         await room.localParticipant.setMicrophoneEnabled(true);
-        document.getElementById('join').disabled=true;document.getElementById('mute').disabled=false;document.getElementById('leave').disabled=false;status('Connected — microphone live');
+        try{{if(room.startAudio)await room.startAudio();}}catch(e){{}}
+        document.querySelectorAll('#remoteAudio audio').forEach(el=>{{el.muted=false;el.volume=1.0;el.play().catch(()=>{{}});}});
+        document.getElementById('join').disabled=true;document.getElementById('join').textContent='Connected Automatically';document.getElementById('mute').disabled=false;document.getElementById('leave').disabled=false;status('Connected automatically — two-way live audio active');
       }}catch(e){{status('Live audio error: '+(e.message||e));}}}}
-      document.getElementById('join').onclick=autoJoin;
+      document.getElementById('join').onclick=async()=>{{
+        if(!room) await autoJoin();
+        try{{if(room && room.startAudio)await room.startAudio();}}catch(e){{}}
+        document.querySelectorAll('#remoteAudio audio').forEach(el=>{{el.muted=false;el.volume=1.0;el.play().catch(()=>{{}});}});
+        status('Connected — student audio enabled');
+      }};
       autoJoin();
       document.getElementById('mute').onclick=async()=>{{if(!room)return;micEnabled=!micEnabled;await room.localParticipant.setMicrophoneEnabled(micEnabled);document.getElementById('mute').textContent=micEnabled?'Mute':'Unmute';status(micEnabled?'Connected — microphone live':'Connected — microphone muted');}};
       document.getElementById('leave').onclick=async()=>{{if(!room)return;await room.disconnect();room=null;document.getElementById('join').disabled=false;document.getElementById('mute').disabled=true;document.getElementById('leave').disabled=true;status('Disconnected');}};
@@ -212,8 +228,10 @@ export default function(component) {
       await room.connect(data.url,data.token);
       room.remoteParticipants.forEach((p)=>p.trackPublications.forEach((pub)=>{if(pub.track)attach(pub.track,LK);}));
       localTrack=await LK.createLocalAudioTrack(); await room.localParticipant.publishTrack(localTrack);
-      join.disabled=false; join.textContent='🔊 Enable Teacher Audio'; start.disabled=false; leave.disabled=false;
-      say('Connected — tap Enable Teacher Audio so you can hear the teacher');
+      try{ if(room.startAudio) await room.startAudio(); }catch(e){}
+      remote.querySelectorAll('audio').forEach((el)=>{el.muted=false;el.volume=1.0;el.play().catch(()=>{});});
+      join.disabled=true; join.textContent='Connected Automatically'; start.disabled=false; leave.disabled=false;
+      say('Connected automatically — two-way live audio active');
     }catch(e){ say('Live audio error: '+(e.message||e)); }
   }
   join.onclick=async()=>{
