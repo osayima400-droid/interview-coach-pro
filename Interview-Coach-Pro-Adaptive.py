@@ -308,131 +308,6 @@ def create_realtime_client_secret(instructions, voice="marin"):
     return ephemeral
 
 
-
-def get_teacher_remote_controls(room):
-    """Return teacher-owned student-room controls without changing existing interview data."""
-    defaults = {
-        "interview_running": False,
-        "interview_paused": False,
-        "natural_voice_enabled": True,
-        "ai_muted": False,
-        "command": "",
-        "command_id": 0,
-    }
-    current = room.get("teacher_remote_controls") or {}
-    defaults.update(current)
-    return defaults
-
-
-def set_teacher_remote_controls(room, **updates):
-    """Persist teacher controls in the room so the student room follows them."""
-    controls = get_teacher_remote_controls(room)
-    controls.update(updates)
-    room["teacher_remote_controls"] = controls
-    save_room(room)
-    return controls
-
-
-def teacher_student_room_remote_panel(room):
-    """Teacher-side remote control panel for the student's interview room."""
-    st.markdown("### 🎛️ Student Interview Room — Teacher Remote Control")
-    st.caption(
-        "These controls govern the student's interview flow. "
-        "The student keeps only browser microphone permission and emergency disconnect controls."
-    )
-    c = get_teacher_remote_controls(room)
-
-    a, b, c1 = st.columns(3)
-    with a:
-        if st.button("▶️ Start Student Interview", use_container_width=True):
-            set_teacher_remote_controls(
-                room, interview_running=True, interview_paused=False,
-                command="start", command_id=int(c["command_id"]) + 1
-            )
-            st.success("Student interview started.")
-            st.rerun()
-    with b:
-        pause_label = "▶️ Resume Student" if c["interview_paused"] else "⏸️ Pause Student"
-        if st.button(pause_label, use_container_width=True):
-            set_teacher_remote_controls(
-                room, interview_paused=not c["interview_paused"],
-                command="resume" if c["interview_paused"] else "pause",
-                command_id=int(c["command_id"]) + 1
-            )
-            st.rerun()
-    with c1:
-        if st.button("⏹️ End Student Interview", use_container_width=True):
-            set_teacher_remote_controls(
-                room, interview_running=False, interview_paused=False,
-                command="end", command_id=int(c["command_id"]) + 1
-            )
-            st.warning("Student interview ended.")
-            st.rerun()
-
-    d, e, f = st.columns(3)
-    with d:
-        if st.button("➡️ Next Question", use_container_width=True):
-            set_teacher_remote_controls(
-                room, command="next_question",
-                command_id=int(c["command_id"]) + 1
-            )
-            st.rerun()
-    with e:
-        if st.button("🔁 Repeat Question", use_container_width=True):
-            set_teacher_remote_controls(
-                room, command="repeat_question",
-                command_id=int(c["command_id"]) + 1
-            )
-            st.rerun()
-    with f:
-        if st.button("❓ Ask AI Follow-up", use_container_width=True):
-            set_teacher_remote_controls(
-                room, command="follow_up",
-                command_id=int(c["command_id"]) + 1
-            )
-            st.rerun()
-
-    g, h = st.columns(2)
-    with g:
-        natural = st.toggle(
-            "🌐 Allow Natural Live Voice in student room",
-            value=bool(c["natural_voice_enabled"]),
-            key=f"remote_voice_{room.get('code','')}"
-        )
-    with h:
-        ai_muted = st.toggle(
-            "🔇 Mute AI interviewer",
-            value=bool(c["ai_muted"]),
-            key=f"remote_ai_mute_{room.get('code','')}"
-        )
-
-    if natural != c["natural_voice_enabled"] or ai_muted != c["ai_muted"]:
-        set_teacher_remote_controls(
-            room, natural_voice_enabled=natural, ai_muted=ai_muted,
-            command="settings_changed", command_id=int(c["command_id"]) + 1
-        )
-
-    state = get_teacher_remote_controls(room)
-    status = "RUNNING" if state["interview_running"] else "STOPPED"
-    if state["interview_paused"]:
-        status = "PAUSED"
-    st.info(f"Student interview status: **{status}**")
-
-
-def student_remote_control_status(room):
-    """Student-facing status only; private teacher settings stay hidden."""
-    c = get_teacher_remote_controls(room)
-    if not c["interview_running"]:
-        st.info("⏳ Waiting for the teacher to start your interview.")
-        return c, False
-    if c["interview_paused"]:
-        st.warning("⏸️ The teacher has paused the interview. Please wait.")
-        return c, False
-    if c["ai_muted"]:
-        st.info("🔇 The AI interviewer is temporarily muted by the teacher.")
-    return c, True
-
-
 def live_voice_component(client_secret, first_question, room_code, voice="marin"):
     """Natural hands-free browser interview using WebRTC and automatic turn detection."""
     secret_js = json.dumps(client_secret)
@@ -699,19 +574,7 @@ def source_box(label,key):
 
 def generate_questions(role,band,advert,jd,ps,application,n):
     instructions="""You are an NHS/healthcare interview-panel question designer. Use ONLY the recruitment materials supplied. Generate realistic, vacancy-specific interview questions. Cross-reference the job advert, job description, person specification and candidate application. Prioritise essential criteria and core responsibilities; include relevant values, clinical/technical knowledge, safeguarding/safety, communication/teamwork, scenarios and motivation. Generate application-evidence follow-ups only where the application actually supports them. Do not invent candidate experience or requirements. Avoid duplicate/generic questions when specific evidence exists. Return JSON only as an object with key questions. questions is an array of objects with keys question, type, why_asked, source_basis, expected_concepts. type should be one of motivation, competency, behavioural_STAR, scenario, safeguarding, values, knowledge, clinical_technical, teamwork_leadership, application_followup."""
-    prompt=f"""
-STRICT MOCK-INTERVIEW SOURCE RULE:
-Every generated mock-interview question MUST be specifically grounded in the recruitment materials supplied by the TEACHER for THIS room:
-1) Job Advert,
-2) Job Description (JD),
-3) Person Specification (PS), and
-4) Candidate Application.
-Use the vacancy's own terminology, duties, essential/desirable criteria, qualifications, experience requirements, values, service context, and claims in the candidate's application.
-Do NOT introduce generic NHS questions, unrelated competencies, invented Trust/Board values, invented duties, or requirements that are not supported by those teacher-supplied materials.
-Application-based questions may test or clarify claims actually present in the supplied application.
-If one of the four source documents is absent or contains no usable text, do not invent content for it; generate only from the source material that is actually present.
-For each generated question, internally identify the supporting source category (Advert/JD/PS/Application) and the specific criterion or claim being tested.
-ROLE: {role}\nBAND: {band}\nNUMBER OF QUESTIONS: {n}\n\nJOB ADVERT:\n{advert}\n\nJOB DESCRIPTION:\n{jd}\n\nPERSON SPECIFICATION:\n{ps}\n\nCANDIDATE APPLICATION FORM:\n{application}\n\nGenerate exactly {n} adaptive questions grounded in these materials."""
+    prompt=f"""ROLE: {role}\nBAND: {band}\nNUMBER OF QUESTIONS: {n}\n\nJOB ADVERT:\n{advert}\n\nJOB DESCRIPTION:\n{jd}\n\nPERSON SPECIFICATION:\n{ps}\n\nCANDIDATE APPLICATION FORM:\n{application}\n\nGenerate exactly {n} adaptive questions grounded in these materials."""
     res=client().responses.create(model="gpt-5.6",instructions=instructions,input=prompt)
     text=res.output_text.strip()
     if text.startswith("```"): text=text.split("\n",1)[1].rsplit("```",1)[0].strip()
@@ -985,8 +848,7 @@ if mode=="Teacher":
             logout_button("🚪 Log Out of Teacher Room")
             st.divider(); st.subheader(f"Live Room: {code}")
             st.write(f"**Student:** {r['student'] or 'Not named'} | **Role:** {r['role']} | **{r['band']}**")
-            st.markdown("### 🎧 Teacher Listen-Only — Step 1")
-            st.info("LISTEN-ONLY TEST: Join the existing room audio and keep the teacher microphone muted. First confirm that teacher-side room audio is connected before we add teacher speaking.")
+            st.markdown("### 🎧 Live Interview Audio")
             st.caption("Live audio reconnects automatically while you remain in this room. Use Leave only when you intentionally want to disconnect audio.")
             live_audio_panel(code,"Teacher")
 
