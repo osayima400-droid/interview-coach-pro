@@ -258,7 +258,9 @@ export default function(component) {
         const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'});
         const reader=new FileReader();
         reader.onloadend=()=>{
-          setStateValue('recording',{data_url:reader.result,mime:blob.type,size:blob.size,duration_ms:(recordingStartedAt ? Date.now()-recordingStartedAt : 0)});
+          const actualMime=(blob.type||recorder.mimeType||'audio/webm').split(';')[0];
+          const ext=actualMime.includes('mp4')?'m4a':actualMime.includes('ogg')?'ogg':actualMime.includes('wav')?'wav':'webm';
+          setStateValue('recording',{data_url:reader.result,mime:actualMime,filename:'student-answer.'+ext,size:blob.size,duration_ms:(recordingStartedAt ? Date.now()-recordingStartedAt : 0)});
           say('Answer recorded and sent for transcription. Live audio remains connected.');
         };
         reader.readAsDataURL(blob);
@@ -569,12 +571,18 @@ def transcribe(audio):
     return out.text
 
 def recording_bytes(recording):
-    data_url=(recording or {}).get("data_url","")
+    """Decode browser audio while preserving its real MIME/container."""
+    data_url=str(recording.get("data_url",""))
     if not data_url or "," not in data_url:
-        return b"", (recording or {}).get("mime","audio/webm")
-    header,payload=data_url.split(",",1)
-    mime=(recording or {}).get("mime") or (header.split(";")[0].replace("data:","") if header.startswith("data:") else "audio/webm")
-    return base64.b64decode(payload), mime
+        raise ValueError("Invalid or empty student recording.")
+    header,b64=data_url.split(",",1)
+    audio_bytes=base64.b64decode(b64)
+    if not audio_bytes:
+        raise ValueError("Student recording is empty.")
+    mime=str(recording.get("mime") or "").split(";")[0].strip().lower()
+    if not mime and header.startswith("data:"):
+        mime=header[5:].split(";")[0].strip().lower()
+    return audio_bytes,(mime or "audio/webm")
 
 def transcribe_data_url(recording):
     if not recording or not recording.get("data_url"):
