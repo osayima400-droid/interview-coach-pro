@@ -14,7 +14,7 @@ def conn():
     for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT", "audio_data BLOB", "audio_mime TEXT", "audio_name TEXT", "teacher_token TEXT", "mock_settings TEXT", "mock_state TEXT", "interview_mode TEXT"]:
         try: c.execute(f"ALTER TABLE rooms ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
-    c.commit(); return 
+    c.commit(); return c
 
 def hp(x): return hashlib.sha256(x.encode()).hexdigest()
 
