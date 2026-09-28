@@ -10,7 +10,7 @@ DB="interview_coach.db"
 def conn():
     c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
     c.execute("""CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY,pin TEXT,student TEXT,role TEXT,band TEXT,vacancy TEXT,question TEXT,answer TEXT,result TEXT,shared INTEGER DEFAULT 0,status TEXT,updated TEXT)""")
-    for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT", "audio_data BLOB", "audio_mime TEXT", "audio_name TEXT", "teacher_token TEXT"]:
+    for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT", "audio_data BLOB", "audio_mime TEXT", "audio_name TEXT", "teacher_token TEXT", "mock_settings TEXT", "mock_state TEXT", "interview_mode TEXT"]:
         try: c.execute(f"ALTER TABLE rooms ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
     c.commit(); return c
@@ -682,6 +682,58 @@ if mode=="Teacher":
             st.caption("Live audio reconnects automatically while you remain in this room. Use Leave only when you intentionally want to disconnect audio.")
             live_audio_panel(code,"Teacher")
 
+            st.markdown("### 🎛️ Teacher Mock Interview Controls")
+            st.caption("These controls are private. Students do not see them; they only experience the interview.")
+            try:
+                saved_mock_settings=json.loads(r["mock_settings"] or "{}")
+            except Exception:
+                saved_mock_settings={}
+            tc1,tc2,tc3=st.columns(3)
+            mock_difficulty=tc1.selectbox("Difficulty",["Standard","Challenging","Very Challenging"],
+                index=["Standard","Challenging","Very Challenging"].index(saved_mock_settings.get("difficulty","Standard")))
+            mock_scrutiny=tc2.selectbox("Panel scrutiny",["Standard","High","Strict Panel"],
+                index=["Standard","High","Strict Panel"].index(saved_mock_settings.get("scrutiny","Strict Panel")))
+            mock_max_probes=tc3.slider("Maximum probes per question",1,5,int(saved_mock_settings.get("max_probes",3)))
+            tc4,tc5=st.columns(2)
+            mock_n_questions=tc4.slider("Number of mock interview questions",3,20,int(saved_mock_settings.get("n_questions",8)))
+            mock_ack=tc5.selectbox("AI acknowledgement",["Never","Occasionally","When threshold reached"],
+                index=["Never","Occasionally","When threshold reached"].index(saved_mock_settings.get("acknowledgement","Never")))
+            ta1,ta2,ta3=st.columns(3)
+            mock_talking=ta1.toggle("🔊 Talking AI interviewer",value=bool(saved_mock_settings.get("talking",True)))
+            mock_delivery=ta2.toggle("🎧 Speaking & delivery analysis",value=bool(saved_mock_settings.get("analyse_delivery",True)))
+            mock_star=ta3.toggle("⭐ STAR scrutiny",value=bool(saved_mock_settings.get("star_check",True)))
+            tb1,tb2,tb3=st.columns(3)
+            mock_safety=tb1.toggle("🛡️ Safety scrutiny",value=bool(saved_mock_settings.get("safety_check",True)))
+            mock_contradiction=tb2.toggle("🔁 Contradiction checking",value=bool(saved_mock_settings.get("contradiction_check",True)))
+            mock_application=tb3.toggle("📄 Application evidence checking",value=bool(saved_mock_settings.get("application_check",True)))
+
+            current_settings={
+                "difficulty":mock_difficulty,"scrutiny":mock_scrutiny,"max_probes":mock_max_probes,
+                "n_questions":mock_n_questions,"acknowledgement":mock_ack,"talking":mock_talking,
+                "analyse_delivery":mock_delivery,"star_check":mock_star,"safety_check":mock_safety,
+                "contradiction_check":mock_contradiction,"application_check":mock_application
+            }
+            if current_settings != saved_mock_settings:
+                update(code,mock_settings=json.dumps(current_settings))
+                r=room(code)
+
+            mc1,mc2=st.columns(2)
+            if mc1.button("🎬 Start Teacher-Controlled Mock Interview",type="primary"):
+                with st.spinner("Building the vacancy-specific mock interview..."):
+                    try:
+                        mock_bank=generate_questions(r["role"],r["band"],r["job_advert"] or "",r["job_description"] or "",r["person_spec"] or "",r["application_form"] or "",int(mock_n_questions))
+                        ms={"bank":mock_bank,"index":0,"turns":[],"probe":None,"probe_count":0,"answers":[],"finished":False,"report":None}
+                        first_q=mock_bank[0].get("question","") if mock_bank else ""
+                        update(code,mock_settings=json.dumps(current_settings),mock_state=json.dumps(ms),interview_mode="mock",
+                               question=first_q,answer="",audio_data=None,audio_mime=None,audio_name=None,result="",shared=0,status="mock_question_sent")
+                        st.success("Mock interview started. The first question is now on the student's Mock Interview screen.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Mock interview setup error: {e}")
+            if mc2.button("⏹️ End Mock Interview"):
+                update(code,interview_mode="",status="mock_ended")
+                st.rerun()
+
             st.markdown("### 🧠 Adaptive AI Question Bank")
             st.caption("No app-set question-bank limit: generate additional batches whenever you want. Existing questions are kept.")
             nq=st.number_input("Questions to add in this batch",min_value=1,max_value=50,value=10,step=1)
@@ -729,8 +781,8 @@ if mode=="Teacher":
                     st.success("Result is visible to the student.")
                     if st.button("Make Result Private"): update(code,shared=0); st.rerun()
 
-elif mode in ["Student","Mock Interview"]:
-    st.header("🎤 Student Mock Interview Room" if mode=="Mock Interview" else "🎤 Student Interview Room")
+elif mode=="Student":
+    st.header("🎤 Student Interview Room")
     initial_student_code=saved_code if saved_mode=="Student" else ""
     code=st.text_input("Enter Student Code",value=initial_student_code).upper().strip()
     if code:
@@ -798,8 +850,8 @@ elif mode in ["Student","Mock Interview"]:
                 if r["result"] and r["shared"]: st.divider(); st.header("📋 Teacher-Shared Feedback"); show(json.loads(r["result"]))
                 elif r["result"]: st.info("Your answer has been assessed. The teacher has not shared the result yet.")
 
-else:
-    st.header("🧑‍🎓 "+mode)
+elif mode=="Student Practice":
+    st.header("🧑‍🎓 Student Practice")
     is_mock=False
     role=st.text_input("Role")
     band=st.selectbox("Band",["Band 2","Band 3","Band 4","Band 5","Band 6","Band 7","Other"])
@@ -905,3 +957,122 @@ else:
                 st.write(delivery_metrics(" ".join(state.get("answers",[])),None))
             if st.button("Start New Session"):
                 del st.session_state[state_key]; st.rerun()
+
+
+elif mode=="Mock Interview":
+    st.header("🎤 Student Mock Interview")
+    st.caption("Your teacher controls the mock interview privately. Assessment settings, scoring, keywords and coaching controls are hidden from the student.")
+    code=st.text_input("Enter Student Code",key="mock_student_code").upper().strip()
+    if code:
+        r=room(code)
+        if not r:
+            st.error("Room not found.")
+        else:
+            st.write(f"**Role:** {r['role']} | **{r['band']}**")
+            if r["interview_mode"]!="mock":
+                st.info("Waiting for the teacher to start your mock interview.")
+                if st.button("Refresh Mock Interview"): st.rerun()
+            else:
+                try:
+                    settings=json.loads(r["mock_settings"] or "{}")
+                    ms=json.loads(r["mock_state"] or "{}")
+                except Exception:
+                    settings={}; ms={}
+                talking=bool(settings.get("talking",True))
+                max_probes=int(settings.get("max_probes",3))
+                scrutiny=settings.get("scrutiny","Strict Panel")
+                star_check=bool(settings.get("star_check",True))
+                safety_check=bool(settings.get("safety_check",True))
+                contradiction_check=bool(settings.get("contradiction_check",True))
+                application_check=bool(settings.get("application_check",True))
+                acknowledgement=settings.get("acknowledgement","Never")
+
+                if ms.get("finished"):
+                    st.success("Thank you. That concludes your mock interview.")
+                    if talking:
+                        speak_text("Thank you. That concludes your mock interview.",f"mock_close_{code}")
+                    st.caption("Your teacher can review the private panel assessment.")
+                else:
+                    q=(r["question"] or "").strip()
+                    if q:
+                        idx=int(ms.get("index",0))
+                        bank=ms.get("bank",[])
+                        st.markdown(f"### Question {min(idx+1,len(bank)) if bank else idx+1}")
+                        st.info(q)
+                        if talking:
+                            speak_text(q,f"mock_speak_{code}_{idx}_{ms.get('probe_count',0)}")
+
+                        audio=st.audio_input("🎙️ Record your answer",key=f"mock_audio_{code}_{idx}_{ms.get('probe_count',0)}")
+                        typed=st.text_area("Or type your answer",height=150,key=f"mock_text_{code}_{idx}_{ms.get('probe_count',0)}")
+                        if st.button("Submit Answer",type="primary",key=f"mock_submit_{code}_{idx}_{ms.get('probe_count',0)}"):
+                            ans=typed.strip()
+                            raw=None; mime=None
+                            if audio and not ans:
+                                with st.spinner("Transcribing your answer..."):
+                                    raw=audio.getvalue()
+                                    mime=getattr(audio,"type","audio/wav") or "audio/wav"
+                                    ans=transcribe(audio).strip()
+                            if not ans:
+                                st.warning("Record or type an answer first.")
+                            else:
+                                with st.spinner("Submitting your answer to the interview panel..."):
+                                    try:
+                                        base_q=bank[idx].get("question","") if bank and idx < len(bank) else q
+                                        check=scrutinize(r["role"],r["band"],r["vacancy"],base_q,ans,
+                                            ms.get("probe_count",0),max_probes,practice=False,
+                                            star_check=star_check,safety_check=safety_check,
+                                            contradiction_check=contradiction_check,
+                                            application_check=application_check,scrutiny_level=scrutiny)
+
+                                        if ms.get("probe") is None:
+                                            qrec={"question":base_q,"initial_answer":ans,
+                                                  "initial_evidence_percent":check.get("completion_percent",0),
+                                                  "responses":[{"prompt":q,"answer":ans,"assessment":check}],
+                                                  "probes_required":0}
+                                            ms.setdefault("turns",[]).append(qrec)
+                                        else:
+                                            qrec=ms["turns"][-1]
+                                            qrec.setdefault("responses",[]).append({"prompt":q,"answer":ans,"assessment":check})
+                                        ms.setdefault("answers",[]).append(ans)
+
+                                        probe=(check.get("probe_question") or "").strip()
+                                        can_probe=int(ms.get("probe_count",0)) < max_probes
+                                        completed=bool(check.get("earned_well_done") or check.get("status")=="complete")
+
+                                        if (not completed) and probe and can_probe:
+                                            ms["probe_count"]=int(ms.get("probe_count",0))+1
+                                            qrec["probes_required"]=ms["probe_count"]
+                                            ms["probe"]=probe
+                                            next_q=probe
+                                        else:
+                                            qrec["final_evidence_percent"]=check.get("completion_percent",0)
+                                            ms["index"]=idx+1
+                                            ms["probe"]=None
+                                            ms["probe_count"]=0
+                                            if ms["index"] >= len(bank):
+                                                ms["finished"]=True
+                                                next_q=""
+                                            else:
+                                                next_q=bank[ms["index"]].get("question","")
+
+                                        # Private teacher result: never shown to the mock student.
+                                        private_result={
+                                            "mock_panel_check":check,
+                                            "question_number":idx+1,
+                                            "probe_count":qrec.get("probes_required",0),
+                                            "student_answer":ans
+                                        }
+                                        update(code,answer=ans,audio_data=raw,audio_mime=mime,audio_name="mock-answer" if raw else None,
+                                               result=json.dumps(private_result),shared=0,
+                                               mock_state=json.dumps(ms),question=next_q,
+                                               status="mock_finished" if ms.get("finished") else "mock_question_sent")
+                                        if completed and acknowledgement=="When threshold reached":
+                                            st.success("Thank you. That covers the question.")
+                                        else:
+                                            st.success("Answer submitted.")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Mock interview processing error: {e}")
+                    else:
+                        st.info("Waiting for the next interview question.")
+                        if st.button("Refresh"): st.rerun()
