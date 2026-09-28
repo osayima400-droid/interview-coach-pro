@@ -199,7 +199,7 @@ export default function(component) {
         const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'});
         const reader=new FileReader();
         reader.onloadend=()=>{
-          setStateValue('recording',{data_url:reader.result,mime:blob.type,size:blob.size});
+          setStateValue('recording',{data_url:reader.result,mime:blob.type,size:blob.size,duration_ms:(recordingStartedAt ? Date.now()-recordingStartedAt : 0)});
           say('Answer recorded and sent for transcription. Live audio remains connected.');
         };
         reader.readAsDataURL(blob);
@@ -275,6 +275,110 @@ def transcribe_data_url(recording):
     out=client().audio.transcriptions.create(model="gpt-4o-mini-transcribe",file=(f"student-answer.{ext}",data,mime))
     return out.text
 
+def speak_text(text, key="speech"):
+    """Free browser text-to-speech: no additional paid voice service is activated."""
+    if not text: return
+    payload=json.dumps(str(text))
+    components.html(f"""<div style='padding:6px 0'><button onclick='speechSynthesis.cancel();let u=new SpeechSynthesisUtterance({payload});u.rate=0.95;speechSynthesis.speak(u);'>🔊 Hear AI Interviewer</button><button onclick='speechSynthesis.cancel()'>⏹ Stop</button></div>""",height=48)
+
+def delivery_metrics(answer, duration_seconds=None):
+    words=[w for w in str(answer).replace("\n"," ").split() if w.strip()]
+    low=" "+" ".join(words).lower()+" "
+    fillers=[" um "," erm "," uh "," you know "," basically "," actually "," like "]
+    filler_count=sum(low.count(x) for x in fillers)
+    repeated=0
+    for a,b in zip(words,words[1:]):
+        if a.strip('.,!?').lower()==b.strip('.,!?').lower(): repeated+=1
+    wpm=None
+    if duration_seconds and duration_seconds>5:
+        wpm=round(len(words)/(duration_seconds/60))
+    return {"word_count":len(words),"duration_seconds":round(duration_seconds or 0,1),"words_per_minute":wpm,"filler_words_detected":filler_count,"immediate_word_repetitions":repeated}
+
+def scrutinize(role,band,vacancy,question,answer,prior_probes=0,max_probes=3,practice=False,star_check=True,safety_check=True,contradiction_check=True,application_check=True,scrutiny_level='High'):
+    instructions="""You are the strict but professional AI interview panel for Interview Coach Pro. Judge ONLY evidence actually spoken by the candidate and criteria supported by the supplied vacancy material. Do not reward keywords alone. Determine whether the answer is correct, relevant, sufficiently specific, safe, within role scope, and complete for the question. For behavioural questions examine personal contribution and STAR evidence where appropriate. For clinical/scenario questions prioritise safety, prioritisation, escalation, communication and role scope where relevant. Identify contradictions or unsupported claims cautiously; ask for clarification rather than accusing dishonesty.
+
+Return JSON only with keys: status, completion_percent, safety_status, missing_critical_evidence, probe_question, reason, earned_well_done, completion_matrix, evidence_quotes. completion_matrix is a list of objects with criterion, met, evidence. evidence_quotes must be brief phrases actually heard in the answer.
+status must be one of complete, incomplete, vague, incorrect, unsafe, irrelevant.
+earned_well_done is true ONLY when the candidate has sufficiently answered the question without unresolved critical gaps.
+If incomplete/vague/incorrect/unsafe and another probe is allowed, write ONE natural panel follow-up that probes the most important unresolved issue WITHOUT revealing the model answer. Never include a hint in Mock mode. If the probe limit is exhausted, probe_question must be empty. completion_percent is evidence coverage, not a probability."""
+    prompt=f"""ROLE: {role}\nBAND: {band}\nVACANCY MATERIAL:\n{vacancy}\nQUESTION:\n{question}\nCANDIDATE ANSWER:\n{answer}\nPROBES ALREADY USED: {prior_probes}\nMAX PROBES: {max_probes}\nMODE: {'PRACTICE/TEACHER' if practice else 'MOCK INTERVIEW'}\nSCRUTINY LEVEL: {scrutiny_level}\nSTAR CHECK: {star_check}\nSAFETY CHECK: {safety_check}\nCONTRADICTION CHECK: {contradiction_check}\nAPPLICATION EVIDENCE CHECK: {application_check}"""
+    res=client().responses.create(model="gpt-5.6",instructions=instructions,input=prompt)
+    raw=res.output_text.strip()
+    if raw.startswith("```"): raw=raw.split("\n",1)[1].rsplit("```",1)[0].strip()
+    out=json.loads(raw)
+    if prior_probes>=max_probes: out["probe_question"]=""
+    return out
+
+def final_panel_report(role,band,vacancy,turns,delivery=None):
+    instructions="""Act as a structured NHS-style interview assessor. Use the supplied vacancy's Trust/Board criteria and any explicit employer scoring matrix found in the materials. Never invent an official employer scale. If an explicit employer scale is present, use it. Otherwise label the result 'NHS-style simulated structured scoring' and use a transparent 0-5 evidence scale. Distinguish independent first-answer performance from evidence obtained after panel probing. Do not treat eventual prompted knowledge as equivalent to an excellent independent first answer. Return JSON only with keys employer, scoring_framework_label, scale_explanation, overall_percent, questions_answered_independently, total_questions, jd_ps_coverage_percent, content_percent, star_percent, safety_summary, strongest_area, priority_improvements, question_results, delivery_comment, panel_perspectives. panel_perspectives must include appropriate Hiring Manager, Role-Specific/Clinical-Technical, and Values/People viewpoints; never impose clinical criteria on a non-clinical vacancy. Each question_results item must contain question, score, max_score, initial_evidence_percent, final_evidence_percent, probes_required, evidence_met, evidence_missing, score_reason."""
+    prompt=f"ROLE: {role}\nBAND: {band}\nVACANCY MATERIAL:\n{vacancy}\nINTERVIEW RECORD:\n{json.dumps(turns)}\nDELIVERY METRICS:\n{json.dumps(delivery or {})}"
+    res=client().responses.create(model="gpt-5.6",instructions=instructions,input=prompt)
+    raw=res.output_text.strip()
+    if raw.startswith("```"): raw=raw.split("\n",1)[1].rsplit("```",1)[0].strip()
+    return json.loads(raw)
+
+
+def performance_traffic_light(percent):
+    """Coaching traffic-light indicator; not an employer pass/fail rule unless vacancy materials say so."""
+    try:
+        pct=max(0, min(100, float(percent)))
+    except Exception:
+        pct=0
+    if pct >= 70:
+        return "GREEN", "Strong performance", "#15803d", "🟢"
+    if pct >= 50:
+        return "YELLOW", "Developing / needs improvement", "#ca8a04", "🟡"
+    return "RED", "Below expected evidence level", "#b91c1c", "🔴"
+
+def show_traffic_light(percent, title="Performance indicator"):
+    band,label,colour,icon=performance_traffic_light(percent)
+    html=(f'<div style="border:2px solid {colour};border-radius:12px;padding:12px 16px;margin:8px 0 14px 0;">'
+          f'<div style="font-size:1.35rem;font-weight:700;color:{colour};">{icon} {band} — {label}</div>'
+          f'<div style="font-size:0.95rem;">{title}: <b>{round(float(percent))}%</b></div></div>')
+    st.markdown(html, unsafe_allow_html=True)
+    return band,label
+
+def show_panel_report(r):
+    st.header("📋 Final Interview Panel Report")
+    st.caption(str(r.get("scoring_framework_label","NHS-style simulated structured scoring")))
+    a,b,c=st.columns(3)
+    a.metric("Overall evidence",f"{r.get('overall_percent',0)}%")
+    b.metric("JD/PS coverage",f"{r.get('jd_ps_coverage_percent',0)}%")
+    c.metric("Content",f"{r.get('content_percent',0)}%")
+    show_traffic_light(r.get("overall_percent",0), "Overall mock-interview performance")
+    st.caption("Traffic-light colours are coaching indicators. They are not an official employer pass/fail threshold unless the supplied vacancy/recruitment materials explicitly define those thresholds.")
+    st.write("**Employer:**",r.get("employer","Not identified"))
+    st.write("**Scoring basis:**",r.get("scale_explanation",""))
+    st.write("**Safety:**",r.get("safety_summary",""))
+    st.write("**Questions answered independently:**",f"{r.get('questions_answered_independently',0)}/{r.get('total_questions',0)}")
+    st.markdown("### Question-by-question evidence")
+    for i,x in enumerate(r.get("question_results",[]),1):
+        with st.expander(f"Q{i}: {x.get('score',0)}/{x.get('max_score',5)} — {x.get('question','')}"):
+            try:
+                qmax=float(x.get('max_score',5) or 5); qscore=float(x.get('score',0) or 0)
+                qpercent=(qscore/qmax)*100 if qmax else 0
+            except Exception:
+                qpercent=0
+            show_traffic_light(qpercent, f"Question {i} performance")
+            st.write("**Initial evidence coverage:**",f"{x.get('initial_evidence_percent',0)}%")
+            st.write("**Final evidence coverage:**",f"{x.get('final_evidence_percent',0)}%")
+            st.write("**Panel probes required:**",x.get("probes_required",0))
+            st.write("**Evidence met:**",x.get("evidence_met",[]))
+            st.write("**Evidence missing:**",x.get("evidence_missing",[]))
+            st.write("**Why this score:**",x.get("score_reason",""))
+    st.markdown("### Priority improvements")
+    for x in r.get("priority_improvements",[]): st.write("•",x)
+    if r.get("delivery_comment"): st.write("**Speaking/delivery:**",r.get("delivery_comment"))
+    if r.get("panel_perspectives"):
+        st.markdown("### 👥 Simulated panel perspectives")
+        pp=r.get("panel_perspectives")
+        if isinstance(pp,dict):
+            for panel_name,comment in pp.items():
+                st.write(f"**{panel_name}:**",comment)
+        else:
+            st.write(pp)
+
+
 def extract_upload(upload):
     if upload is None: return ""
     name=upload.name.lower(); data=upload.getvalue()
@@ -339,7 +443,13 @@ Use a standardised 0-5 display scale so the student can understand performance, 
 4 = strong, specific evidence meeting nearly all relevant vacancy indicators at the expected role/Band level.
 5 = excellent, comprehensive and specific evidence meeting all or almost all relevant vacancy indicators at the expected role/Band level.
 
-If the supplied Trust/Board documents explicitly state their own interview scoring scale, weighting, values framework, competency framework, pass rule, or question-specific scoring instructions, FOLLOW THAT documented method instead of assuming a generic NHS method. Explain the applicable scale in scoring_note.
+SCORING-SCALE SOURCE RULE:
+- First identify the employing NHS Trust/Board from the supplied vacancy material.
+- Search ONLY the supplied recruitment/scoring material for an explicit interview scale, weighting, pass rule, competency matrix or question-specific scoring instruction.
+- If an explicit employer scale is supplied, reproduce and apply that scale exactly, including its maximum score and documented threshold where present.
+- Never infer a Trust/Board scoring scale merely from the employer name.
+- If no explicit employer scoring scale is supplied, use the app's 0-5 COACHING SIMULATION scale below and clearly state that the scale is simulated, while the CONTENT criteria remain specific to that Trust/Board vacancy.
+- Explain the source of the scale in scoring_note.
 
 RULES:
 - Award marks only for evidence actually present in the candidate's answer.
@@ -357,7 +467,7 @@ RULES:
 - Do not declare a candidate universally NHS 'appointable' or 'not appointable' unless the supplied employer documents explicitly define such a threshold and the available evidence permits that conclusion.
 
 Return JSON only with keys:
-trust_or_board, question_type, panel_is_testing, trust_requirements_used, marking_matrix, essential_criteria_relevant, desirable_criteria_relevant, values_relevant, likely_keywords, vacancy_matches, nhs_score, max_score, overall_score, verdict, correctness, safety_status, score_breakdown, criteria_met, criteria_not_met, strengths, missing_points, improvements, framework, suggested_answer, follow_up_questions, scoring_note.
+trust_or_board, question_type, panel_is_testing, trust_requirements_used, marking_matrix, essential_criteria_relevant, desirable_criteria_relevant, values_relevant, likely_keywords, vacancy_matches, nhs_score, max_score, overall_score, verdict, correctness, safety_status, score_breakdown, criteria_met, criteria_not_met, strengths, missing_points, improvements, framework, suggested_answer, follow_up_questions, scoring_note, scoring_framework_status, employer_pass_rule, performance_indicator.
 
 marking_matrix must identify each relevant vacancy-specific criterion and what evidence in this answer would demonstrate it.
 trust_requirements_used must identify which supplied Trust/Board requirements were actually used to score this question.
@@ -406,12 +516,48 @@ Score this answer specifically against the requirements of the supplied Trust/Bo
     result["nhs_score"]=score
     result["max_score"]=max_score
     result["overall_score"]=round((score/max_score)*100) if max_score else 0
+
+    # Transparent coaching traffic-light display.
+    # These colours are NOT presented as an employer pass/fail rule unless the
+    # supplied employer material explicitly states such a rule.
+    pct=result["overall_score"]
+    if pct >= 70:
+        result["traffic_light"]="GREEN"
+        result["traffic_label"]="Strong performance"
+        result["traffic_icon"]="🟢"
+    elif pct >= 50:
+        result["traffic_light"]="YELLOW"
+        result["traffic_label"]="Developing / needs strengthening"
+        result["traffic_icon"]="🟡"
+    else:
+        result["traffic_light"]="RED"
+        result["traffic_label"]="Significant improvement needed"
+        result["traffic_icon"]="🔴"
     return result
 
 def show(r):
-    cscore,cpercent=st.columns(2)
-    cscore.metric("NHS-style question score",f"{int(r.get('nhs_score',0))}/{int(r.get('max_score',5))}")
-    cpercent.metric("Equivalent percentage",f"{int(r.get('overall_score',0))}/100")
+    score=int(r.get("nhs_score",0))
+    max_score=int(r.get("max_score",5) or 5)
+    pct=int(r.get("overall_score",0))
+    if pct >= 70:
+        icon,label,bg,border="🟢","GREEN — Strong performance","#e8f5e9","#2e7d32"
+    elif pct >= 50:
+        icon,label,bg,border="🟡","YELLOW — Developing / needs strengthening","#fff8e1","#f9a825"
+    else:
+        icon,label,bg,border="🔴","RED — Significant improvement needed","#ffebee","#c62828"
+
+    cscore,cpercent,cstatus=st.columns(3)
+    cscore.metric("Question score",f"{score}/{max_score}")
+    cpercent.metric("Equivalent percentage",f"{pct}/100")
+    cstatus.metric("Performance",f"{icon} {label.split(' — ')[0]}")
+    st.markdown(
+        f"""<div style="padding:14px;border-radius:10px;background:{bg};
+        border:2px solid {border};font-weight:700;font-size:18px">
+        {icon} {label}
+        </div>""",
+        unsafe_allow_html=True
+    )
+    st.caption("Traffic-light colours are coaching indicators unless the supplied Trust/Board recruitment material explicitly defines its own pass/performance thresholds.")
     st.subheader(r.get("verdict","Assessment"))
     a,b=st.columns(2)
     with a:
@@ -438,6 +584,8 @@ def show(r):
     st.write("**Score breakdown:**",r.get("score_breakdown",{}))
     st.write("**Criteria met:**",r.get("criteria_met",[]))
     st.write("**Criteria not met:**",r.get("criteria_not_met",[]))
+    st.write("**Scoring framework status:**",r.get("scoring_framework_status","Employer-specific scale not explicitly identified; coaching simulation used unless supplied material states otherwise."))
+    st.write("**Employer pass/performance rule:**",r.get("employer_pass_rule","Not specified in supplied recruitment material."))
     st.caption(r.get("scoring_note",""))
     st.write("**Expected concepts/keywords:**",", ".join(r.get("likely_keywords",[])))
     st.markdown("### Recommended framework"); st.write(r.get("framework",""))
@@ -476,7 +624,7 @@ def logout_button(label="Log Out"):
 saved_mode,saved_code,saved_token=persistent_login_params()
 
 st.title("🎓 Interview Coach Pro")
-st.caption("Teacher-controlled interview room • Live two-way audio • Timed voice capture • NHS-style evidence scoring • Vacancy-specific AI assessment")
+st.caption("Teacher-controlled interview room • Live two-way audio • Timed voice capture • Trust/Board-specific evidence scoring • Red/Yellow/Green performance • Vacancy-specific AI assessment")
 mode_options=["Teacher","Student","Student Practice","Mock Interview"]
 default_mode=saved_mode if saved_mode in ["Teacher","Student"] else "Teacher"
 mode=st.sidebar.radio("Open as",mode_options,index=mode_options.index(default_mode))
@@ -488,17 +636,20 @@ if mode=="Teacher":
         student=st.text_input("Student name")
         role=st.text_input("Role")
         band=st.selectbox("Band",["Band 2","Band 3","Band 4","Band 5","Band 6","Band 7","Other"])
+        employer=st.text_input("Employing NHS Trust / Health Board",help="Example: NHS Lothian, Manchester University NHS Foundation Trust, NHS Greater Glasgow and Clyde.")
         st.markdown("### Recruitment documents")
         advert=source_box("Job Advert","advert")
         jd=source_box("Job Description (JD)","jd")
         ps=source_box("Person Specification (PS)","ps")
         application=source_box("Candidate Application Form / Supporting Information","application")
+        scoring_policy=source_box("Trust/Board Interview Scoring Policy or Recruitment Scoring Matrix (optional)","scoring_policy")
+        st.caption("If an official employer scoring matrix is supplied here, the assessor will use it. If none is supplied, the app will not invent an official Trust/Board scale.")
         pin=st.text_input("Create private Teacher PIN",type="password")
         if st.button("Create Interview Room",type="primary"):
             if not role or not pin: st.warning("Enter the role and Teacher PIN.")
             else:
                 code=uuid.uuid4().hex[:6].upper(); c=conn()
-                combined="\n\n".join(["JOB ADVERT:\n"+advert,"JOB DESCRIPTION:\n"+jd,"PERSON SPECIFICATION:\n"+ps,"APPLICATION FORM:\n"+application])
+                combined="\n\n".join(["EMPLOYING NHS TRUST/BOARD:\n"+employer,"JOB ADVERT:\n"+advert,"JOB DESCRIPTION:\n"+jd,"PERSON SPECIFICATION:\n"+ps,"APPLICATION FORM:\n"+application,"EMPLOYER INTERVIEW SCORING POLICY / MATRIX:\n"+scoring_policy])
                 c.execute("INSERT INTO rooms(code,pin,student,role,band,vacancy,status,updated,job_advert,job_description,person_spec,application_form,question_bank) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(code,hp(pin),student,role,band,combined,"waiting",datetime.now().isoformat(),advert,jd,ps,application,""))
                 teacher_token=uuid.uuid4().hex
                 c.execute("UPDATE rooms SET teacher_token=? WHERE code=?",(teacher_token,code))
@@ -649,21 +800,108 @@ elif mode=="Student":
 
 else:
     st.header("🧑‍🎓 "+mode)
-    role=st.text_input("Role"); band=st.selectbox("Band",["Band 2","Band 3","Band 4","Band 5","Band 6","Band 7","Other"])
-    vacancy=st.text_area("Paste Job Advert / JD / PS / relevant application evidence",height=200)
-    question=st.text_area("Interview question")
-    method=st.radio("Answer using",["🎙️ Microphone","⌨️ Type"],horizontal=True)
-    if method=="🎙️ Microphone":
-        audio=st.audio_input("Record your answer")
-        if audio and st.button("Transcribe"):
-            with st.spinner("Transcribing..."):
-                try: st.session_state.pt=transcribe(audio)
-                except Exception as e: st.error(f"Transcription error: {e}")
-        ans=st.text_area("Transcript",value=st.session_state.get("pt",""),height=200)
-    else: ans=st.text_area("Your answer",height=200)
-    if st.button("Analyse My Answer",type="primary"):
-        if not question.strip() or not ans.strip(): st.warning("Enter a question and answer.")
+    is_mock=(mode=="Mock Interview")
+    role=st.text_input("Role")
+    band=st.selectbox("Band",["Band 2","Band 3","Band 4","Band 5","Band 6","Band 7","Other"])
+    vacancy=st.text_area("Paste Job Advert + JD + Person Specification + Trust/Board values + relevant application evidence",height=220)
+    scoring_policy=st.text_area("Employer interview scoring policy/matrix (optional — paste only if verified)",height=100)
+    full_vacancy=vacancy+("\n\nEMPLOYER SCORING POLICY / MATRIX:\n"+scoring_policy if scoring_policy.strip() else "")
+
+    st.markdown("### Interview settings")
+    c1,c2,c3=st.columns(3)
+    difficulty=c1.selectbox("Difficulty",["Standard","Challenging","Very Challenging"])
+    scrutiny=c2.selectbox("Panel scrutiny",["Standard","High","Strict Panel"],index=2 if is_mock else 1)
+    max_probes=c3.slider("Maximum probes per question",1,5,3)
+    n_questions=st.slider("Number of interview questions",3,20,8)
+
+    st.markdown("### Teacher-controlled assessment options")
+    a1,a2,a3=st.columns(3)
+    talking=a1.toggle("🔊 Talking AI interviewer",value=True)
+    analyse_delivery=a2.toggle("🎧 Speaking & delivery analysis",value=True)
+    star_check=a3.toggle("⭐ STAR scrutiny",value=True)
+    b1,b2,b3=st.columns(3)
+    safety_check=b1.toggle("🛡️ Safety scrutiny",value=True)
+    contradiction_check=b2.toggle("🔁 Contradiction checking",value=True)
+    application_check=b3.toggle("📄 Application evidence checking",value=True)
+    acknowledgement=st.selectbox("AI acknowledgement",["Never","Occasionally","When threshold reached"],index=0 if is_mock else 2)
+    if is_mock:
+        st.info("Mock Interview keeps scores, missing points, keywords and suggested answers hidden until the interview is finished.")
+
+    state_key="mock_state" if is_mock else "practice_state"
+    if st.button("🎬 Start "+("Mock Interview" if is_mock else "Practice Session"),type="primary"):
+        if not role.strip() or not vacancy.strip(): st.warning("Enter the role and vacancy materials first.")
         else:
-            with st.spinner("Analysing..."):
-                try: show(assess(role,band,vacancy,question,ans))
-                except Exception as e: st.error(f"Assessment error: {e}")
+            with st.spinner("Building a vacancy-specific interview panel..."):
+                try:
+                    bank=generate_questions(role,band,vacancy,"",vacancy,"",n_questions)
+                    st.session_state[state_key]={"bank":bank,"index":0,"turns":[],"probe":None,"probe_count":0,"answers":[],"finished":False,"report":None}
+                    st.rerun()
+                except Exception as e: st.error(f"Interview setup error: {e}")
+
+    state=st.session_state.get(state_key)
+    if state and not state.get("finished"):
+        i=state["index"]; bank=state["bank"]
+        if i < len(bank):
+            item=bank[i]; base_q=item.get("question","")
+            current_q=state.get("probe") or base_q
+            st.divider(); st.subheader(f"Question {i+1} of {len(bank)}")
+            if is_mock: st.info(current_q)
+            else:
+                st.info(current_q)
+                if not state.get("probe"): st.caption("Practice mode: feedback and teaching are available after your attempt.")
+            if talking: speak_text(current_q,f"speak_{i}_{state.get('probe_count',0)}")
+            audio=st.audio_input("🎙️ Record your answer",key=f"aud_{state_key}_{i}_{state.get('probe_count',0)}")
+            typed=st.text_area("Or type your answer",key=f"txt_{state_key}_{i}_{state.get('probe_count',0)}",height=150)
+            if st.button("Submit Answer",type="primary",key=f"submit_{state_key}_{i}_{state.get('probe_count',0)}"):
+                ans=typed.strip(); duration=None
+                if audio and not ans:
+                    with st.spinner("Transcribing your answer..."):
+                        ans=transcribe(audio).strip()
+                if not ans: st.warning("Record or type an answer first.")
+                else:
+                    with st.spinner("Panel is scrutinising your answer..."):
+                        try:
+                            check=scrutinize(role,band,full_vacancy,base_q,ans,state.get("probe_count",0),max_probes,practice=not is_mock,star_check=star_check,safety_check=safety_check,contradiction_check=contradiction_check,application_check=application_check,scrutiny_level=scrutiny)
+                            if state.get("probe") is None:
+                                qrec={"question":base_q,"initial_answer":ans,"initial_evidence_percent":check.get("completion_percent",0),"responses":[{"prompt":base_q,"answer":ans,"assessment":check}],"probes_required":0}
+                                state["turns"].append(qrec)
+                            else:
+                                qrec=state["turns"][-1]; qrec["responses"].append({"prompt":current_q,"answer":ans,"assessment":check})
+                            state["answers"].append(ans)
+                            probe=check.get("probe_question","").strip()
+                            can_probe=state.get("probe_count",0)<max_probes
+                            if check.get("earned_well_done") or check.get("status")=="complete":
+                                qrec["final_evidence_percent"]=check.get("completion_percent",0)
+                                if not is_mock: st.success("Well done. You have now covered the key evidence required for this question.")
+                                state["index"]+=1; state["probe"]=None; state["probe_count"]=0
+                                if state["index"]>=len(bank): state["finished"]=True
+                                st.session_state[state_key]=state; st.rerun()
+                            elif probe and can_probe:
+                                state["probe_count"]+=1; qrec["probes_required"]=state["probe_count"]; state["probe"]=probe
+                                st.session_state[state_key]=state; st.rerun()
+                            else:
+                                qrec["final_evidence_percent"]=check.get("completion_percent",0)
+                                state["index"]+=1; state["probe"]=None; state["probe_count"]=0
+                                if state["index"]>=len(bank): state["finished"]=True
+                                st.session_state[state_key]=state; st.rerun()
+                        except Exception as e: st.error(f"Panel analysis error: {e}")
+
+    state=st.session_state.get(state_key)
+    if state and state.get("finished"):
+        st.success("Thank you. That concludes your "+("mock interview." if is_mock else "practice session."))
+        if talking: speak_text("Thank you. That concludes your mock interview." if is_mock else "Well done. That concludes your practice session.","closing")
+        if state.get("report") is None:
+            if st.button("📊 Generate Final Panel Report",type="primary"):
+                with st.spinner("Preparing evidence-based panel report..."):
+                    try:
+                        joined=" ".join(state.get("answers",[])); metrics=delivery_metrics(joined,None) if analyse_delivery else {}
+                        state["report"]=final_panel_report(role,band,full_vacancy,state.get("turns",[]),metrics)
+                        st.session_state[state_key]=state; st.rerun()
+                    except Exception as e: st.error(f"Report error: {e}")
+        else:
+            show_panel_report(state["report"])
+            if analyse_delivery:
+                st.markdown("### 🎧 Observable speaking/delivery indicators")
+                st.write(delivery_metrics(" ".join(state.get("answers",[])),None))
+            if st.button("Start New Session"):
+                del st.session_state[state_key]; st.rerun()
