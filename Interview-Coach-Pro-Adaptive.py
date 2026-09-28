@@ -308,13 +308,16 @@ def create_realtime_client_secret(instructions, voice="marin"):
     return ephemeral
 
 
-def live_voice_component(client_secret, first_question, room_code, voice="marin"):
+def live_voice_component(client_secret, first_question, room_code, voice="marin", livekit_url="", livekit_token_value=""):
     """Natural hands-free browser interview using WebRTC and automatic turn detection."""
     secret_js = json.dumps(client_secret)
     q_js = json.dumps(first_question or "")
     room_js = json.dumps(room_code or "")
+    lk_url_js = json.dumps(livekit_url or "")
+    lk_token_js = json.dumps(livekit_token_value or "")
 
     live_html = f"""
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
     <div style="font-family:Arial,sans-serif;border:1px solid #555;border-radius:14px;padding:14px">
       <div style="font-size:18px;font-weight:700">🎙️ British-English Live AI Interviewer</div>
       <div id="status" style="margin:8px 0">Ready. Press Start once.</div>
@@ -330,19 +333,24 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
     (() => {{
       const token = {secret_js};
       const firstQuestion = {q_js};
-      const room = {room_js};
+      const roomCode = {room_js};
+      const lkUrl = {lk_url_js};
+      const lkToken = {lk_token_js};
       const status = document.getElementById("status");
       const turn = document.getElementById("turn");
       const start = document.getElementById("start");
       const stop = document.getElementById("stop");
       const remoteAudio = document.getElementById("remoteAudio");
 
-      let pc = null, dc = null, mic = null;
+      let pc = null, dc = null, mic = null, lkRoom = null, lkMicTrack = null, aiPublishedTrack = null;
 
       function disconnect() {{
         if (mic) mic.getTracks().forEach(t => t.stop());
         if (dc) {{ try {{ dc.close(); }} catch(e) {{}} }}
         if (pc) {{ try {{ pc.close(); }} catch(e) {{}} }}
+        if (aiPublishedTrack) {{ try {{ aiPublishedTrack.stop(); }} catch(e) {{}} aiPublishedTrack=null; }}
+        if (lkMicTrack) {{ try {{ lkMicTrack.stop(); }} catch(e) {{}} lkMicTrack=null; }}
+        if (lkRoom) {{ try {{ lkRoom.disconnect(); }} catch(e) {{}} lkRoom=null; }}
         mic = null; dc = null; pc = null;
         start.disabled = false;
         stop.disabled = true;
@@ -353,12 +361,46 @@ def live_voice_component(client_secret, first_question, room_code, voice="marin"
         status.textContent = "Connecting securely…";
         try {{
           pc = new RTCPeerConnection();
-          pc.ontrack = e => {{
+          pc.ontrack = async e => {{
             remoteAudio.srcObject = e.streams[0];
+            // Publish the AI interviewer audio into the SAME LiveKit room so the teacher hears it.
+            try {{
+              if (lkRoom && e.track && e.track.kind === "audio" && !aiPublishedTrack) {{
+                aiPublishedTrack = new LivekitClient.LocalAudioTrack(e.track);
+                await lkRoom.localParticipant.publishTrack(aiPublishedTrack, {{name:"ai-interviewer"}});
+              }}
+            }} catch(err) {{ console.warn("Could not publish AI audio to teacher room", err); }}
           }};
 
           mic = await navigator.mediaDevices.getUserMedia({{audio:true}});
           mic.getTracks().forEach(track => pc.addTrack(track, mic));
+
+          // Join the teacher's existing LiveKit room without changing the rest of the app.
+          // Student microphone is published so the teacher hears the student.
+          // Teacher microphone is subscribed here so the student hears the teacher.
+          if (lkUrl && lkToken && window.LivekitClient) {{
+            try {{
+              const LK = window.LivekitClient;
+              lkRoom = new LK.Room({{adaptiveStream:true,dynacast:true}});
+              lkRoom.on(LK.RoomEvent.TrackSubscribed, (track, publication, participant) => {{
+                if (track.kind === LK.Track.Kind.Audio && publication.trackName !== "ai-interviewer") {{
+                  const el = track.attach(); el.autoplay = true; el.style.display = "none";
+                  document.body.appendChild(el); el.play().catch(()=>{{}});
+                }}
+              }});
+              await lkRoom.connect(lkUrl, lkToken);
+              lkRoom.remoteParticipants.forEach((p)=>p.trackPublications.forEach((pub)=>{{
+                if(pub.track && pub.track.kind===LK.Track.Kind.Audio && pub.trackName !== "ai-interviewer") {{
+                  const el=pub.track.attach(); el.autoplay=true; el.style.display="none"; document.body.appendChild(el); el.play().catch(()=>{{}});
+                }}
+              }}));
+              const micTrack = mic.getAudioTracks()[0];
+              if (micTrack) {{
+                lkMicTrack = new LK.LocalAudioTrack(micTrack.clone());
+                await lkRoom.localParticipant.publishTrack(lkMicTrack, {{name:"student-microphone"}});
+              }}
+            }} catch(err) {{ console.warn("Teacher room audio connection failed", err); }}
+          }}
 
           dc = pc.createDataChannel("oai-events");
 
@@ -906,6 +948,21 @@ if mode=="Teacher":
                 update(code,interview_mode="",status="mock_ended")
                 st.rerun()
 
+            # Teacher remains the question controller during Mock Interview.
+            # This does not change scoring or any other interview behaviour.
+            r=room(code)
+            if r and r["interview_mode"]=="mock":
+                st.markdown("### 🎤 Active Mock — Teacher Question Control")
+                st.caption("The AI must use the question currently sent by you. You can replace it with another vacancy-grounded question at any time.")
+                teacher_live_q=st.text_area("Current mock question — teacher may edit before sending", value=r["question"] or "", key=f"teacher_live_mock_q_{code}")
+                if st.button("📨 Send / Replace Current Mock Question", key=f"send_live_mock_q_{code}"):
+                    if teacher_live_q.strip():
+                        update(code,question=teacher_live_q.strip(),status="mock_question_sent")
+                        # Force a fresh Realtime session so the AI opens with the newly teacher-selected question.
+                        st.session_state.pop("live_secret_"+code, None)
+                        st.success("Your question is now the active mock-interview question.")
+                        st.rerun()
+
             st.markdown("### 🧠 Adaptive AI Question Bank")
             st.caption("No app-set question-bank limit: generate additional batches whenever you want. Existing questions are kept.")
             nq=st.number_input("Questions to add in this batch",min_value=1,max_value=50,value=10,step=1)
@@ -1202,8 +1259,13 @@ Maximum probes per question: {settings.get('max_probes',3)}
                                         except Exception as e:
                                             st.error(str(e))
                             else:
-                                live_voice_component(st.session_state["live_secret_"+code], q, code, settings.get("live_voice","marin"))
-                                st.caption("Live voice is metered only while a Realtime session is actually connected.")
+                                try:
+                                    lk_url, lk_token_value = livekit_token(code, f"mock-student-{uuid.uuid4().hex[:10]}", can_publish=True, can_subscribe=True)
+                                except Exception as e:
+                                    lk_url, lk_token_value = "", ""
+                                    st.warning(f"Teacher room audio is unavailable: {e}")
+                                live_voice_component(st.session_state["live_secret_"+code], q, code, settings.get("live_voice","marin"), lk_url, lk_token_value)
+                                st.caption("Live voice is metered only while a Realtime session is actually connected. The teacher can join the same room to hear the student and AI, and speak to the student.")
                             st.divider()
                             st.caption("Recorded-answer fallback")
 
