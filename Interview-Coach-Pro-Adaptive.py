@@ -253,6 +253,175 @@ def student_live_audio_capture(room_code):
     )
     return getattr(result,"recording",None)
 
+
+def create_realtime_client_secret(instructions, voice="marin"):
+    """Create a short-lived Realtime credential on the Streamlit server."""
+    api_key = secret("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is missing from Streamlit Secrets.")
+
+    payload = {
+        "session": {
+            "type": "realtime",
+            "model": "gpt-realtime-2.1",
+            "instructions": instructions,
+            "audio": {
+                "output": {"voice": voice},
+                "input": {
+                    "turn_detection": {
+                        "type": "semantic_vad",
+                        "eagerness": "low",
+                        "create_response": True,
+                        "interrupt_response": True
+                    }
+                }
+            }
+        }
+    }
+
+    sid = hashlib.sha256(
+        ("interview-coach-pro|" + str(datetime.now().date())).encode()
+    ).hexdigest()[:32]
+
+    response = requests.post(
+        "https://api.openai.com/v1/realtime/client_secrets",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "OpenAI-Safety-Identifier": sid
+        },
+        json=payload,
+        timeout=30
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"Could not prepare Live Voice ({response.status_code}): "
+            + response.text[:400]
+        )
+
+    data = response.json()
+    ephemeral = data.get("value")
+    if not ephemeral and isinstance(data.get("client_secret"), dict):
+        ephemeral = data["client_secret"].get("value")
+    if not ephemeral:
+        raise RuntimeError("OpenAI did not return the short-lived Live Voice credential.")
+    return ephemeral
+
+
+def live_voice_component(client_secret, first_question, room_code, voice="marin"):
+    """Natural hands-free browser interview using WebRTC and automatic turn detection."""
+    secret_js = json.dumps(client_secret)
+    q_js = json.dumps(first_question or "")
+    room_js = json.dumps(room_code or "")
+
+    live_html = f"""
+    <div style="font-family:Arial,sans-serif;border:1px solid #555;border-radius:14px;padding:14px">
+      <div style="font-size:18px;font-weight:700">🎙️ British-English Live AI Interviewer</div>
+      <div id="status" style="margin:8px 0">Ready. Press Start once.</div>
+      <button id="start" style="padding:10px 15px">▶ Start live interview</button>
+      <button id="stop" disabled style="padding:10px 15px;margin-left:6px">■ End & disconnect</button>
+      <div id="turn" style="margin-top:10px;font-size:14px">
+        When you finish speaking, the interviewer will respond automatically.
+      </div>
+      <audio id="remoteAudio" autoplay></audio>
+    </div>
+
+    <script>
+    (() => {{
+      const token = {secret_js};
+      const firstQuestion = {q_js};
+      const room = {room_js};
+      const status = document.getElementById("status");
+      const turn = document.getElementById("turn");
+      const start = document.getElementById("start");
+      const stop = document.getElementById("stop");
+      const remoteAudio = document.getElementById("remoteAudio");
+
+      let pc = null, dc = null, mic = null;
+
+      function disconnect() {{
+        if (mic) mic.getTracks().forEach(t => t.stop());
+        if (dc) {{ try {{ dc.close(); }} catch(e) {{}} }}
+        if (pc) {{ try {{ pc.close(); }} catch(e) {{}} }}
+        mic = null; dc = null; pc = null;
+        start.disabled = false;
+        stop.disabled = true;
+      }}
+
+      start.onclick = async () => {{
+        start.disabled = true;
+        status.textContent = "Connecting securely…";
+        try {{
+          pc = new RTCPeerConnection();
+          pc.ontrack = e => {{
+            remoteAudio.srcObject = e.streams[0];
+          }};
+
+          mic = await navigator.mediaDevices.getUserMedia({{audio:true}});
+          mic.getTracks().forEach(track => pc.addTrack(track, mic));
+
+          dc = pc.createDataChannel("oai-events");
+
+          dc.onopen = () => {{
+            status.textContent = "Connected — live interview in progress";
+            stop.disabled = false;
+            const opening = firstQuestion
+              ? "Begin now. Give a brief professional welcome, then ask exactly this first interview question: " + firstQuestion
+              : "Begin now with a brief professional welcome and the first interview question.";
+            dc.send(JSON.stringify({{
+              type: "response.create",
+              response: {{ instructions: opening }}
+            }}));
+          }};
+
+          dc.onmessage = ev => {{
+            let e;
+            try {{ e = JSON.parse(ev.data); }} catch (_) {{ return; }}
+            if (e.type === "input_audio_buffer.speech_started") {{
+              turn.textContent = "🎤 Listening…";
+            }} else if (e.type === "input_audio_buffer.speech_stopped") {{
+              turn.textContent = "🧠 Answer complete — interviewer is responding…";
+            }} else if (e.type === "response.done") {{
+              turn.textContent = "🎤 Your turn.";
+            }} else if (e.type === "error") {{
+              status.textContent = "Live Voice error: " + (e.error?.message || "Unknown error");
+            }}
+          }};
+
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+
+          const r = await fetch("https://api.openai.com/v1/realtime/calls", {{
+            method: "POST",
+            body: offer.sdp,
+            headers: {{
+              "Authorization": "Bearer " + token,
+              "Content-Type": "application/sdp"
+            }}
+          }});
+
+          if (!r.ok) throw new Error(await r.text());
+          const answer = await r.text();
+          await pc.setRemoteDescription({{type:"answer", sdp:answer}});
+        }} catch (err) {{
+          status.textContent = "Connection failed: " + err.message;
+          disconnect();
+        }}
+      }};
+
+      stop.onclick = () => {{
+        disconnect();
+        status.textContent = "Disconnected. Live Voice usage has stopped.";
+        turn.textContent = "Interview connection closed.";
+      }};
+
+      window.addEventListener("beforeunload", disconnect);
+    }})();
+    </script>
+    """
+    components.html(live_html, height=220)
+
+
 def transcribe(audio):
     data=audio.getvalue()
     out=client().audio.transcriptions.create(model="gpt-4o-mini-transcribe",file=(getattr(audio,"name","answer.wav"),data,getattr(audio,"type","audio/wav")))
@@ -1020,7 +1189,7 @@ Ask one question at a time. Listen fully. When the student finishes, respond nat
 If the answer is incomplete, vague, contradictory, unsafe, or needs evidence, ask one concise targeted follow-up.
 Otherwise move naturally to the next appropriate question.
 Do not coach during Mock Interview. Do not tell the student their score.
-Be warm, professional, concise, and human-sounding.
+Speak in natural British English with a calm, professional UK interview-panel manner. Use ordinary British pronunciation and vocabulary without exaggerating the accent. Be warm, professional, concise, and human-sounding.
 Vacancy context:
 {vacancy_context}
 Current teacher-selected difficulty: {settings.get('difficulty','Standard')}
