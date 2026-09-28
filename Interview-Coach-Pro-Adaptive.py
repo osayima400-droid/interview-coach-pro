@@ -1,4 +1,5 @@
 import streamlit as st
+import requests
 from openai import OpenAI
 import os, json, sqlite3, uuid, hashlib, html, base64, io
 from datetime import datetime
@@ -682,22 +683,6 @@ if mode=="Teacher":
             st.caption("Live audio reconnects automatically while you remain in this room. Use Leave only when you intentionally want to disconnect audio.")
             live_audio_panel(code,"Teacher")
 
-            st.markdown("### 🗣️ Natural Interactive Interview — PREVIEW")
-            st.info("PREVIEW ONLY — no paid realtime voice service is activated. This lets you see the intended teacher-controlled conversation flow first.")
-            pv1,pv2,pv3=st.columns(3)
-            with pv1:
-                st.markdown("**1. AI PANEL SPEAKS**")
-                st.caption("Natural human-style interviewer voice asks the vacancy-specific question.")
-            with pv2:
-                st.markdown("**2. STUDENT ANSWERS**")
-                st.caption("Student speaks naturally. The final version detects end-of-turn/silence automatically.")
-            with pv3:
-                st.markdown("**3. AI RESPONDS**")
-                st.caption("Private assessment decides: targeted probe, acknowledgement, or next question.")
-            st.markdown("**Interactive loop:** AI question → Student voice → End of turn → Private assessment → AI probe/next question → Student voice")
-            st.caption("Teacher controls remain private. Student sees/hears only the interview experience. Scores, missing points, keywords and suggested answers stay hidden during Mock Interview.")
-            st.divider()
-
             st.markdown("### 🎛️ Teacher Mock Interview Controls")
             st.caption("These controls are private. Students do not see them; they only experience the interview.")
             try:
@@ -716,6 +701,8 @@ if mode=="Teacher":
                 index=["Never","Occasionally","When threshold reached"].index(saved_mock_settings.get("acknowledgement","Never")))
             ta1,ta2,ta3=st.columns(3)
             mock_talking=ta1.toggle("🔊 Talking AI interviewer",value=bool(saved_mock_settings.get("talking",True)))
+            live_voice_enabled=ta1.toggle("🌐 GPT-Live natural voice",value=bool(saved_mock_settings.get("live_voice_enabled",False)),
+                help="When enabled, the student can start a metered GPT-Live voice session. This may incur OpenAI API usage charges.")
             mock_delivery=ta2.toggle("🎧 Speaking & delivery analysis",value=bool(saved_mock_settings.get("analyse_delivery",True)))
             mock_star=ta3.toggle("⭐ STAR scrutiny",value=bool(saved_mock_settings.get("star_check",True)))
             tb1,tb2,tb3=st.columns(3)
@@ -726,7 +713,7 @@ if mode=="Teacher":
             current_settings={
                 "difficulty":mock_difficulty,"scrutiny":mock_scrutiny,"max_probes":mock_max_probes,
                 "n_questions":mock_n_questions,"acknowledgement":mock_ack,"talking":mock_talking,
-                "analyse_delivery":mock_delivery,"star_check":mock_star,"safety_check":mock_safety,
+                "analyse_delivery":mock_delivery,"live_voice_enabled":live_voice_enabled,"live_voice":"marin","star_check":mock_star,"safety_check":mock_safety,
                 "contradiction_check":mock_contradiction,"application_check":mock_application
             }
             if current_settings != saved_mock_settings:
@@ -977,8 +964,6 @@ elif mode=="Student Practice":
 
 elif mode=="Mock Interview":
     st.header("🎤 Student Mock Interview")
-    st.success("🗣️ Interactive interview preview: the AI interviewer asks the question aloud, you answer naturally, and the interview continues with a relevant follow-up or next question. Teacher assessment controls remain hidden.")
-
     st.caption("Your teacher controls the mock interview privately. Assessment settings, scoring, keywords and coaching controls are hidden from the student.")
     code=st.text_input("Enter Student Code",key="mock_student_code").upper().strip()
     if code:
@@ -1019,6 +1004,39 @@ elif mode=="Mock Interview":
                         st.info(q)
                         if talking:
                             speak_text(q,f"mock_speak_{code}_{idx}_{ms.get('probe_count',0)}")
+
+                        if bool(settings.get("live_voice_enabled",False)):
+                            st.markdown("### 🗣️ Natural Live Interview")
+                            st.caption("Press Start live interview once. After that, speak naturally; the AI uses voice activity detection for turn-taking and can respond without a Submit button.")
+                            if "live_secret_"+code not in st.session_state:
+                                if st.button("Enable natural live voice", type="primary", key=f"enable_live_{code}"):
+                                    with st.spinner("Preparing secure live voice session..."):
+                                        try:
+                                            vacancy_context=(r["vacancy"] or "")[:8000]
+                                            live_instructions=f"""You are the natural-voice interviewer for Interview Coach Pro.
+Conduct a professional NHS-style interview for {r['role']} {r['band']}.
+The teacher controls the interview. Never reveal private scoring, keywords, model answers, assessment settings, or hidden criteria to the student.
+Ask one question at a time. Listen fully. When the student finishes, respond naturally.
+If the answer is incomplete, vague, contradictory, unsafe, or needs evidence, ask one concise targeted follow-up.
+Otherwise move naturally to the next appropriate question.
+Do not coach during Mock Interview. Do not tell the student their score.
+Be warm, professional, concise, and human-sounding.
+Vacancy context:
+{vacancy_context}
+Current teacher-selected difficulty: {settings.get('difficulty','Standard')}
+Current panel scrutiny: {settings.get('scrutiny','Strict Panel')}
+Maximum probes per question: {settings.get('max_probes',3)}
+"""
+                                            st.session_state["live_secret_"+code]=create_realtime_client_secret(
+                                                live_instructions, settings.get("live_voice","marin"))
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(str(e))
+                            else:
+                                live_voice_component(st.session_state["live_secret_"+code], q, code, settings.get("live_voice","marin"))
+                                st.caption("Live voice is metered only while a Realtime session is actually connected.")
+                            st.divider()
+                            st.caption("Recorded-answer fallback")
 
                         audio=st.audio_input("🎙️ Record your answer",key=f"mock_audio_{code}_{idx}_{ms.get('probe_count',0)}")
                         typed=st.text_area("Or type your answer",height=150,key=f"mock_text_{code}_{idx}_{ms.get('probe_count',0)}")
