@@ -699,7 +699,19 @@ def source_box(label,key):
 
 def generate_questions(role,band,advert,jd,ps,application,n):
     instructions="""You are an NHS/healthcare interview-panel question designer. Use ONLY the recruitment materials supplied. Generate realistic, vacancy-specific interview questions. Cross-reference the job advert, job description, person specification and candidate application. Prioritise essential criteria and core responsibilities; include relevant values, clinical/technical knowledge, safeguarding/safety, communication/teamwork, scenarios and motivation. Generate application-evidence follow-ups only where the application actually supports them. Do not invent candidate experience or requirements. Avoid duplicate/generic questions when specific evidence exists. Return JSON only as an object with key questions. questions is an array of objects with keys question, type, why_asked, source_basis, expected_concepts. type should be one of motivation, competency, behavioural_STAR, scenario, safeguarding, values, knowledge, clinical_technical, teamwork_leadership, application_followup."""
-    prompt=f"""ROLE: {role}\nBAND: {band}\nNUMBER OF QUESTIONS: {n}\n\nJOB ADVERT:\n{advert}\n\nJOB DESCRIPTION:\n{jd}\n\nPERSON SPECIFICATION:\n{ps}\n\nCANDIDATE APPLICATION FORM:\n{application}\n\nGenerate exactly {n} adaptive questions grounded in these materials."""
+    prompt=f"""
+STRICT MOCK-INTERVIEW SOURCE RULE:
+Every generated mock-interview question MUST be specifically grounded in the recruitment materials supplied by the TEACHER for THIS room:
+1) Job Advert,
+2) Job Description (JD),
+3) Person Specification (PS), and
+4) Candidate Application.
+Use the vacancy's own terminology, duties, essential/desirable criteria, qualifications, experience requirements, values, service context, and claims in the candidate's application.
+Do NOT introduce generic NHS questions, unrelated competencies, invented Trust/Board values, invented duties, or requirements that are not supported by those teacher-supplied materials.
+Application-based questions may test or clarify claims actually present in the supplied application.
+If one of the four source documents is absent or contains no usable text, do not invent content for it; generate only from the source material that is actually present.
+For each generated question, internally identify the supporting source category (Advert/JD/PS/Application) and the specific criterion or claim being tested.
+ROLE: {role}\nBAND: {band}\nNUMBER OF QUESTIONS: {n}\n\nJOB ADVERT:\n{advert}\n\nJOB DESCRIPTION:\n{jd}\n\nPERSON SPECIFICATION:\n{ps}\n\nCANDIDATE APPLICATION FORM:\n{application}\n\nGenerate exactly {n} adaptive questions grounded in these materials."""
     res=client().responses.create(model="gpt-5.6",instructions=instructions,input=prompt)
     text=res.output_text.strip()
     if text.startswith("```"): text=text.split("\n",1)[1].rsplit("```",1)[0].strip()
@@ -973,7 +985,8 @@ if mode=="Teacher":
             logout_button("🚪 Log Out of Teacher Room")
             st.divider(); st.subheader(f"Live Room: {code}")
             st.write(f"**Student:** {r['student'] or 'Not named'} | **Role:** {r['role']} | **{r['band']}**")
-            st.markdown("### 🎧 Live Interview Audio")
+            st.markdown("### 🎧 Teacher Listen-Only — Step 1")
+            st.info("LISTEN-ONLY TEST: Join the existing room audio and keep the teacher microphone muted. First confirm that teacher-side room audio is connected before we add teacher speaking.")
             st.caption("Live audio reconnects automatically while you remain in this room. Use Leave only when you intentionally want to disconnect audio.")
             live_audio_panel(code,"Teacher")
 
