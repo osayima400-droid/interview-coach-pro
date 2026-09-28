@@ -682,6 +682,22 @@ if mode=="Teacher":
             st.caption("Live audio reconnects automatically while you remain in this room. Use Leave only when you intentionally want to disconnect audio.")
             live_audio_panel(code,"Teacher")
 
+            st.markdown("### 🗣️ Natural Interactive Interview — PREVIEW")
+            st.info("PREVIEW ONLY — no paid realtime voice service is activated. This lets you see the intended teacher-controlled conversation flow first.")
+            pv1,pv2,pv3=st.columns(3)
+            with pv1:
+                st.markdown("**1. AI PANEL SPEAKS**")
+                st.caption("Natural human-style interviewer voice asks the vacancy-specific question.")
+            with pv2:
+                st.markdown("**2. STUDENT ANSWERS**")
+                st.caption("Student speaks naturally. The final version detects end-of-turn/silence automatically.")
+            with pv3:
+                st.markdown("**3. AI RESPONDS**")
+                st.caption("Private assessment decides: targeted probe, acknowledgement, or next question.")
+            st.markdown("**Interactive loop:** AI question → Student voice → End of turn → Private assessment → AI probe/next question → Student voice")
+            st.caption("Teacher controls remain private. Student sees/hears only the interview experience. Scores, missing points, keywords and suggested answers stay hidden during Mock Interview.")
+            st.divider()
+
             st.markdown("### 🎛️ Teacher Mock Interview Controls")
             st.caption("These controls are private. Students do not see them; they only experience the interview.")
             try:
@@ -961,6 +977,8 @@ elif mode=="Student Practice":
 
 elif mode=="Mock Interview":
     st.header("🎤 Student Mock Interview")
+    st.success("🗣️ Interactive interview preview: the AI interviewer asks the question aloud, you answer naturally, and the interview continues with a relevant follow-up or next question. Teacher assessment controls remain hidden.")
+
     st.caption("Your teacher controls the mock interview privately. Assessment settings, scoring, keywords and coaching controls are hidden from the student.")
     code=st.text_input("Enter Student Code",key="mock_student_code").upper().strip()
     if code:
