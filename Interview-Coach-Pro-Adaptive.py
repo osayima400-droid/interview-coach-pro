@@ -252,7 +252,10 @@ export default function(component) {
       return;
     }
     try{
+      // Every answer gets a completely fresh MediaRecorder state.
       chunks=[];
+      recorder=null;
+      recordingStartedAt=null;
       const recordingTrack=localTrack.mediaStreamTrack.clone();
       const answerStream=new MediaStream([recordingTrack]);
       const ua=(navigator.userAgent||'').toLowerCase();
@@ -276,8 +279,22 @@ export default function(component) {
         reader.onloadend=()=>{
           const actualMime=(blob.type||recorder.mimeType||'audio/webm').split(';')[0];
           const ext=actualMime.includes('mp4')?'m4a':actualMime.includes('ogg')?'ogg':actualMime.includes('wav')?'wav':'webm';
-          setStateValue('recording',{data_url:reader.result,mime:actualMime,filename:'student-answer.'+ext,size:blob.size,duration_ms:(recordingStartedAt ? Date.now()-recordingStartedAt : 0)});
-          say('Answer recorded and sent for transcription. Live audio remains connected.');
+          setStateValue('recording',{
+            data_url:reader.result,
+            mime:actualMime,
+            filename:'student-answer-'+Date.now()+'.'+ext,
+            size:blob.size,
+            duration_ms:(recordingStartedAt ? Date.now()-recordingStartedAt : 0),
+            recording_id:Date.now().toString()+'-'+Math.random().toString(36).slice(2),
+            submission_nonce:(Date.now().toString(36)+Math.random().toString(36).slice(2))
+          });
+          // Release this answer's recorder state without touching the live interview microphone.
+          chunks=[];
+          recorder=null;
+          recordingStartedAt=null;
+          start.disabled=false;
+          stop.disabled=true;
+          say('Answer sent for transcription and analysis — ready for the next answer. Live audio remains connected.');
         };
         reader.readAsDataURL(blob);
         recordingTrack.stop();
