@@ -227,7 +227,13 @@ export default function(component) {
       room.on(LK.RoomEvent.TrackUnsubscribed,(track)=>track.detach().forEach(el=>el.remove()));
       await room.connect(data.url,data.token);
       room.remoteParticipants.forEach((p)=>p.trackPublications.forEach((pub)=>{if(pub.track)attach(pub.track,LK);}));
-      localTrack=await LK.createLocalAudioTrack(); await room.localParticipant.publishTrack(localTrack);
+      localTrack=await LK.createLocalAudioTrack({
+        echoCancellation:true,
+        noiseSuppression:true,
+        autoGainControl:true
+      });
+      if(localTrack && localTrack.mediaStreamTrack) localTrack.mediaStreamTrack.enabled=true;
+      await room.localParticipant.publishTrack(localTrack,{name:'student-microphone',source:LK.Track.Source.Microphone});
       try{ if(room.startAudio) await room.startAudio(); }catch(e){}
       remote.querySelectorAll('audio').forEach((el)=>{el.muted=false;el.volume=1.0;el.play().catch(()=>{});});
       join.disabled=true; join.textContent='Connected Automatically'; start.disabled=false; leave.disabled=false;
@@ -249,13 +255,23 @@ export default function(component) {
       chunks=[];
       const recordingTrack=localTrack.mediaStreamTrack.clone();
       const answerStream=new MediaStream([recordingTrack]);
-      const candidates=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/mp4'];
+      const ua=(navigator.userAgent||'').toLowerCase();
+      const safari=/safari/.test(ua) && !/chrome|crios|android/.test(ua);
+      const candidates=safari
+        ? ['audio/mp4','audio/webm;codecs=opus','audio/webm']
+        : ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
       const preferred=candidates.find(t=>window.MediaRecorder && MediaRecorder.isTypeSupported(t));
       recorder=preferred ? new MediaRecorder(answerStream,{mimeType:preferred}) : new MediaRecorder(answerStream);
       recorder.ondataavailable=(e)=>{ if(e.data && e.data.size) chunks.push(e.data); };
       recorder.onstop=()=>{
         stopTimer();
         const blob=new Blob(chunks,{type:recorder.mimeType||'audio/webm'});
+        if(!blob || blob.size < 1024){
+          say('Recording contained no usable microphone audio. Check microphone permission and try again.');
+          recordingTrack.stop();
+          start.disabled=false; stop.disabled=true;
+          return;
+        }
         const reader=new FileReader();
         reader.onloadend=()=>{
           const actualMime=(blob.type||recorder.mimeType||'audio/webm').split(';')[0];
@@ -585,14 +601,49 @@ def recording_bytes(recording):
     return audio_bytes,(mime or "audio/webm")
 
 def transcribe_data_url(recording):
+    """Decode and upload the student's browser recording using its actual container."""
     if not recording or not recording.get("data_url"):
         return ""
-    header,b64=recording["data_url"].split(",",1)
+
+    data_url=str(recording["data_url"])
+    if "," not in data_url:
+        raise ValueError("Invalid student audio data.")
+    header,b64=data_url.split(",",1)
     data=base64.b64decode(b64)
-    mime=recording.get("mime") or "audio/webm"
-    ext="webm" if "webm" in mime else ("ogg" if "ogg" in mime else "wav")
-    out=client().audio.transcriptions.create(model="gpt-4o-mini-transcribe",file=(f"student-answer.{ext}",data,mime))
-    return out.text
+    if len(data) < 32:
+        raise ValueError("Student recording is empty or incomplete.")
+
+    declared=str(recording.get("mime") or "").split(";")[0].lower().strip()
+
+    # Detect the actual container from file bytes; this avoids mobile-browser MIME mismatches.
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        ext,mime="wav","audio/wav"
+    elif data[:4] == b"OggS":
+        ext,mime="ogg","audio/ogg"
+    elif data[:3] == b"ID3" or data[:2] in (b"\\xff\\xfb",b"\\xff\\xf3",b"\\xff\\xf2"):
+        ext,mime="mp3","audio/mpeg"
+    elif data[:4] == b"\\x1aE\\xdf\\xa3":
+        ext,mime="webm","audio/webm"
+    elif b"ftyp" in data[:32]:
+        ext,mime="m4a","audio/mp4"
+    elif "mp4" in declared or "m4a" in declared:
+        ext,mime="m4a","audio/mp4"
+    elif "ogg" in declared:
+        ext,mime="ogg","audio/ogg"
+    elif "wav" in declared:
+        ext,mime="wav","audio/wav"
+    elif "mpeg" in declared or "mp3" in declared:
+        ext,mime="mp3","audio/mpeg"
+    else:
+        ext,mime="webm","audio/webm"
+
+    audio_file=io.BytesIO(data)
+    audio_file.name=f"student-answer.{ext}"
+    out=client().audio.transcriptions.create(
+        model="gpt-4o-mini-transcribe",
+        file=audio_file
+    )
+    return (out.text or "").strip()
 
 def speak_text(text, key="speech"):
     """Free browser text-to-speech: no additional paid voice service is activated."""
