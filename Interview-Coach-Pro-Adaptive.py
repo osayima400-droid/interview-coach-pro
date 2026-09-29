@@ -780,7 +780,7 @@ def generate_questions(role,band,advert,jd,ps,application,n):
     if text.startswith("```"): text=text.split("\n",1)[1].rsplit("```",1)[0].strip()
     return json.loads(text)["questions"]
 
-def assess(role,band,vacancy,question,answer):
+def assess(role,band,vacancy,question,answer,coaching_checks=None,application_text=''):
     instructions="""You are a rigorous NHS interview assessor.
 
 PRIMARY RULE — TRUST-SPECIFIC SCORING:
@@ -836,8 +836,18 @@ RULES:
 - If no genuine personal example is available, give a framework/template the candidate can complete truthfully.
 - Do not declare a candidate universally NHS 'appointable' or 'not appointable' unless the supplied employer documents explicitly define such a threshold and the available evidence permits that conclusion.
 
+NORMAL COACHING SCRUTINY:
+When coaching_checks enables a category, include it in the coaching analysis:
+- Speaking & delivery: assess clarity, structure, concision, repetition/fillers only where supported by the captured answer/transcript. Do not assess accent.
+- STAR scrutiny: only for questions where STAR is appropriate; identify Situation, Task, Action, Result and Reflection evidence actually present.
+- Safety scrutiny: identify unsafe, out-of-scope, missing escalation, safeguarding or patient-safety issues only where relevant to the role/question.
+- Contradiction checking: compare the current answer against supplied vacancy/application evidence and flag only concrete inconsistencies; do not invent contradictions.
+- Application evidence checking: state whether claims are supported, unsupported, or not verifiable from the supplied application. Never fabricate candidate experience.
+If a category is disabled, mark it "Not requested".
+Return these five findings in coaching_scrutiny.
+
 Return JSON only with keys:
-trust_or_board, question_type, panel_is_testing, trust_requirements_used, marking_matrix, essential_criteria_relevant, desirable_criteria_relevant, values_relevant, likely_keywords, vacancy_matches, nhs_score, max_score, overall_score, verdict, correctness, safety_status, score_breakdown, criteria_met, criteria_not_met, strengths, missing_points, improvements, framework, suggested_answer, follow_up_questions, scoring_note, scoring_framework_status, employer_pass_rule, performance_indicator.
+trust_or_board, question_type, panel_is_testing, trust_requirements_used, marking_matrix, essential_criteria_relevant, desirable_criteria_relevant, values_relevant, likely_keywords, vacancy_matches, nhs_score, max_score, overall_score, verdict, correctness, safety_status, score_breakdown, criteria_met, criteria_not_met, strengths, missing_points, improvements, framework, suggested_answer, follow_up_questions, scoring_note, scoring_framework_status, employer_pass_rule, performance_indicator, coaching_scrutiny.
 
 marking_matrix must identify each relevant vacancy-specific criterion and what evidence in this answer would demonstrate it.
 trust_requirements_used must identify which supplied Trust/Board requirements were actually used to score this question.
@@ -866,6 +876,12 @@ INTERVIEW QUESTION:
 
 CANDIDATE ANSWER:
 {answer}
+
+NORMAL COACHING CHECKS:
+{json.dumps(coaching_checks or {"delivery":True,"star":True,"safety":True,"contradiction":True,"application":True})}
+
+SUPPLIED CANDIDATE APPLICATION FOR EVIDENCE/CROSS-CHECKING:
+{application_text or "No candidate application supplied"}
 
 Score this answer specifically against the requirements of the supplied Trust/Board vacancy. Do not substitute generic NHS criteria for vacancy-specific criteria."""
     res=client().responses.create(model="gpt-5.6",instructions=instructions,input=prompt)
@@ -1121,6 +1137,23 @@ if mode=="Teacher":
                         st.success("Your question is now the active mock-interview question.")
                         st.rerun()
 
+            st.markdown("### 🎯 Coaching Analysis Controls")
+            st.caption("These controls apply to the normal Teacher + Student coaching interview. They do not require Mock Interview.")
+            cc1,cc2,cc3=st.columns(3)
+            coaching_delivery=cc1.toggle("🎧 Speaking & delivery analysis",value=True,key=f"coach_delivery_{code}")
+            coaching_star=cc2.toggle("⭐ STAR scrutiny",value=True,key=f"coach_star_{code}")
+            coaching_safety=cc3.toggle("🛡️ Safety scrutiny",value=True,key=f"coach_safety_{code}")
+            cc4,cc5=st.columns(2)
+            coaching_contradiction=cc4.toggle("🔁 Contradiction checking",value=True,key=f"coach_contradiction_{code}")
+            coaching_application=cc5.toggle("📄 Application evidence checking",value=True,key=f"coach_application_{code}")
+            coaching_checks={
+                "delivery":coaching_delivery,
+                "star":coaching_star,
+                "safety":coaching_safety,
+                "contradiction":coaching_contradiction,
+                "application":coaching_application,
+            }
+
             st.markdown("### 🧠 Adaptive AI Question Bank")
             st.caption("No app-set question-bank limit: generate additional batches whenever you want. Existing questions are kept.")
             nq=st.number_input("Questions to add in this batch",min_value=1,max_value=50,value=10,step=1)
@@ -1156,7 +1189,7 @@ if mode=="Teacher":
                 st.write(r["answer"])
                 if st.button("🧠 Analyse Answer",type="primary"):
                     with st.spinner("Assessing against the question and vacancy..."):
-                        try: update(code,result=json.dumps(assess(r["role"],r["band"],r["vacancy"],r["question"],r["answer"])),shared=0,status="assessed"); st.rerun()
+                        try: update(code,result=json.dumps(assess(r["role"],r["band"],r["vacancy"],r["question"],r["answer"],coaching_checks,r["application_form"] or "")),shared=0,status="assessed"); st.rerun()
                         except Exception as e: st.error(f"Assessment error: {e}")
             else: st.info("Waiting for student answer.")
             r=room(code)
