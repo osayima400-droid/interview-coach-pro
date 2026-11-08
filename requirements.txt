@@ -2,3 +2,4 @@ streamlit>=1.40
 openai>=2.0
 pypdf
 livekit-api
+psycopg2-binary>=2.9,<3
