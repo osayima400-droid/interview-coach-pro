@@ -8,74 +8,13 @@ import streamlit.components.v1 as components
 st.set_page_config(page_title="Interview Coach Pro", page_icon="🎓", layout="wide")
 DB="interview_coach.db"
 
-# Set DATABASE_URL in Streamlit Community Cloud Secrets to enable durable storage.
-# PostgreSQL is recommended (for example, a managed Supabase or Neon database).
-# SQLite remains supported for local development, but is NOT durable on Community Cloud.
-def database_url():
-    try:
-        return str(st.secrets.get("DATABASE_URL", "") or os.getenv("DATABASE_URL", "")).strip()
-    except Exception:
-        return str(os.getenv("DATABASE_URL", "")).strip()
-
-ROOM_COLUMNS = [
-    "job_advert TEXT", "job_description TEXT", "person_spec TEXT",
-    "application_form TEXT", "question_bank TEXT", "audio_data BLOB",
-    "audio_mime TEXT", "audio_name TEXT", "teacher_token TEXT",
-    "mock_settings TEXT", "mock_state TEXT", "interview_mode TEXT",
-]
-
-class PostgresConnection:
-    """Minimal SQLite-compatible adapter for the existing app's SQL calls."""
-    def __init__(self, url):
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-        self.db = psycopg2.connect(url, connect_timeout=12, sslmode="require")
-        self.cursor_factory = RealDictCursor
-        self.last_cursor = None
-
-    def execute(self, sql, params=()):
-        from psycopg2 import Binary
-        cur = self.db.cursor(cursor_factory=self.cursor_factory)
-        translated = sql.replace("?", "%s")
-        converted = tuple(Binary(v) if isinstance(v, bytes) else v for v in params)
-        cur.execute(translated, converted)
-        self.last_cursor = cur
-        return cur
-
-    def commit(self):
-        self.db.commit()
-
-    def close(self):
-        self.db.close()
-
 def conn():
-    url = database_url()
-    if url:
-        if not url.startswith(("postgresql://", "postgres://")):
-            raise ValueError("DATABASE_URL must be a PostgreSQL connection URL")
-        c = PostgresConnection(url)
-        c.execute("""CREATE TABLE IF NOT EXISTS rooms(
-            code TEXT PRIMARY KEY, pin TEXT, student TEXT, role TEXT, band TEXT,
-            vacancy TEXT, question TEXT, answer TEXT, result TEXT,
-            shared INTEGER DEFAULT 0, status TEXT, updated TEXT)""")
-        for column in ROOM_COLUMNS:
-            column = column.replace("BLOB", "BYTEA")
-            c.execute(f"ALTER TABLE rooms ADD COLUMN IF NOT EXISTS {column}")
-        c.commit()
-        return c
-
-    c=sqlite3.connect(DB, timeout=20)
-    c.row_factory=sqlite3.Row
-    c.execute("PRAGMA busy_timeout=20000")
-    c.execute("""CREATE TABLE IF NOT EXISTS rooms(
-        code TEXT PRIMARY KEY,pin TEXT,student TEXT,role TEXT,band TEXT,
-        vacancy TEXT,question TEXT,answer TEXT,result TEXT,
-        shared INTEGER DEFAULT 0,status TEXT,updated TEXT)""")
-    for col in ROOM_COLUMNS:
+    c=sqlite3.connect(DB); c.row_factory=sqlite3.Row
+    c.execute("""CREATE TABLE IF NOT EXISTS rooms(code TEXT PRIMARY KEY,pin TEXT,student TEXT,role TEXT,band TEXT,vacancy TEXT,question TEXT,answer TEXT,result TEXT,shared INTEGER DEFAULT 0,status TEXT,updated TEXT)""")
+    for col in ["job_advert TEXT", "job_description TEXT", "person_spec TEXT", "application_form TEXT", "question_bank TEXT", "audio_data BLOB", "audio_mime TEXT", "audio_name TEXT", "teacher_token TEXT", "mock_settings TEXT", "mock_state TEXT", "interview_mode TEXT"]:
         try: c.execute(f"ALTER TABLE rooms ADD COLUMN {col}")
         except sqlite3.OperationalError: pass
-    c.commit()
-    return c
+    c.commit(); return c
 
 def hp(x): return hashlib.sha256(x.encode()).hexdigest()
 
@@ -1088,11 +1027,6 @@ def logout_button(label="Log Out"):
 saved_mode,saved_code,saved_token=persistent_login_params()
 
 st.title("🎓 Interview Coach Pro")
-if not database_url():
-    st.sidebar.warning("Local storage only: rooms may disappear after Streamlit Cloud restarts. Configure DATABASE_URL for permanent storage.")
-else:
-    st.sidebar.caption("☁️ Persistent database enabled")
-
 st.caption("Teacher-controlled interview room • Live two-way audio • Timed voice capture • Trust/Board-specific evidence scoring • Red/Yellow/Green performance • Vacancy-specific AI assessment")
 mode_options=["Teacher","Student","Student Practice","Mock Interview"]
 default_mode=saved_mode if saved_mode in ["Teacher","Student"] else "Teacher"
